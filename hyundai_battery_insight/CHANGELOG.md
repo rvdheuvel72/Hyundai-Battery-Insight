@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.9
+
+- Added manual raw snapshot backup and restore from the app UI.
+- Raw backup includes all stored raw snapshot rows and keeps protected raw payloads protected.
+- Restore merges by vehicle timestamp, updating conflicts without deleting unrelated local snapshots.
+- Added format, timestamp, upload-size and vehicle-fingerprint validation for restore.
+- Changed the display period selector to 1, 7, 14, 30, 60 and 90 days.
+- Allowed 1-day timeline/CSV/JSON API queries.
+- Added automated backup/restore round-trip validation.
+
 ## 0.1.8
 
 - Added original Battery Insight logo and Home Assistant app icon.
