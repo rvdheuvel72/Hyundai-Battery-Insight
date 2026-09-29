@@ -1,0 +1,51 @@
+name: Validate
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install validation dependencies
+        run: python -m pip install --disable-pip-version-check PyYAML cryptography
+
+      - name: Validate YAML
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+          for path in (Path("repository.yaml"), Path("hyundai_battery_insight/config.yaml")):
+              with path.open("r", encoding="utf-8") as handle:
+                  value = yaml.safe_load(handle)
+              if not isinstance(value, dict):
+                  raise SystemExit(f"{path} did not parse to a mapping")
+              print(f"OK: {path}")
+          PY
+
+      - name: Compile Python
+        run: python -m py_compile hyundai_battery_insight/app/server.py
+
+      - name: Validate shell script
+        run: bash -n hyundai_battery_insight/run.sh
+
+      - name: Check app presentation files
+        run: |
+          test -f hyundai_battery_insight/icon.png
+          test -f hyundai_battery_insight/logo.png
+          test -f hyundai_battery_insight/README.md
+          test -f hyundai_battery_insight/DOCS.md
+          test -f hyundai_battery_insight/CHANGELOG.md
