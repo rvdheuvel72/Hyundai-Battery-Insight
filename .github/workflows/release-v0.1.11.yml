@@ -1,0 +1,44 @@
+name: Publish v0.1.11 release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release-v0.1.11.yml
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create v0.1.11 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > release-notes.md <<'EOF'
+          Hyundai Battery Insight 0.1.11
+
+          Selected-period historical reconstruction release.
+
+          Highlights:
+          - "Herbouw HA-historie" now follows the selected 1/7/14/30/60/90-day display period.
+          - Raw CCS2 snapshots remain the preferred evidence wherever they exist.
+          - Detailed Home Assistant Recorder state history is used where still retained.
+          - Hourly Home Assistant long-term statistics are used for the older part of the selected period.
+          - Long-term-statistics points are explicitly marked as aggregated evidence, not exact raw snapshots or exact state-change timestamps.
+          - 12V/HV statistics use hourly mean values where available; odometer uses recorded statistics state with safe fallbacks.
+          - Lower-quality statistics points are suppressed when nearby detailed Recorder or raw points exist.
+          - History source type is persisted in the database and portable data backup.
+          - CI covers selected-period long-term-statistics reconstruction.
+
+          Status: experimental.
+          EOF
+
+          gh release create v0.1.11 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target 9b8090d70dd30ffacfb5a9b5da3c7b3f88560180 \
+            --title "Hyundai Battery Insight 0.1.11" \
+            --notes-file release-notes.md
