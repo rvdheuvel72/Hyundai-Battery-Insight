@@ -31,6 +31,11 @@ You are welcome to **fork or clone this repository and modify the app for your o
 
 Use the app at your own discretion and verify important conclusions against the underlying Home Assistant and vehicle data.
 
+
+## Language
+
+The current user interface is **Dutch only**. There is no built-in language selector or English translation at this time.
+
 ## Requirements
 
 - **Home Assistant OS**. Home Assistant Apps are available on Home Assistant OS.
