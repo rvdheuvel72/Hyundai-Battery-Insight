@@ -33,6 +33,10 @@ A raw CCS2 point is taken from one nested `vehicle_data` object and uses the veh
 
 Older timeline points can be reconstructed by correlating separate Home Assistant histories for 12V battery level, HV Battery Level and odometer.
 
+Version 0.1.10 makes this import **additive**. Re-reading Home Assistant Recorder can insert missing correlation points or fill fields that were previously null, but it no longer deletes cached historical points simply because Recorder no longer returns them.
+
+The **Herbouw HA-historie** button manually runs the same three-stream reconstruction over the configured `lookback_days` period. The result reports how many source events Home Assistant returned for each stream and their first/last timestamps. This makes it possible to see whether an older period is still recoverable from Recorder.
+
 These correlated values are useful for trends, but they are not treated as equivalent to one raw vehicle snapshot.
 
 ### No interpolation
@@ -70,25 +74,22 @@ The key is reproducible after reinstall from the same VIN. However, the SQLite d
 
 The app declares `backup: cold`, so Home Assistant stops the app while backing it up to reduce the chance of an inconsistent SQLite backup.
 
-### Manual raw backup and restore
+### Manual data backup and restore
 
-Version 0.1.9 adds two controls to the app UI:
+Version 0.1.10 upgrades the portable backup to `hbi-data-backup-v2` and exposes **Data backup** / **Data herstel** in the UI.
 
-- **Raw backup** downloads a JSON file containing all rows from the raw `snapshots` table, regardless of the currently selected chart period.
-- **Raw herstel** selects one of those backup files and merges it back into the local snapshot store.
+The v2 backup contains both persistent timeline tables:
 
-Restore behavior is deliberately non-destructive outside matching timestamps:
+- all raw `snapshots`, regardless of the selected display period; and
+- all cached `ha_history_points` reconstructed from the separate Home Assistant 12V, HV Battery Level and odometer histories.
 
-- rows with a new `source_ts` are inserted;
-- rows with an existing `source_ts` are updated from the backup;
-- existing local rows that are not present in the backup remain untouched;
-- invalid rows are skipped rather than executed or interpreted dynamically.
+Restore behavior remains non-destructive outside matching raw timestamps. Historical-correlation rows are added or enriched; existing non-null cached values are preserved. Existing version 0.1.9 `hbi-raw-backup-v1` files remain accepted, but those legacy files contain raw snapshots only.
 
-The backup format only accepts the known snapshot columns. The restore endpoint also limits upload size and checks the backup vehicle fingerprint against the current VIN when both are available.
+The backup format only accepts known columns. The restore endpoint limits upload size and checks the backup vehicle fingerprint against the current VIN when both are available.
 
-The complete `raw_json` field remains protected in the backup. Other extracted fields such as timestamps, battery percentages and odometer are stored in readable JSON because they are needed to reconstruct the snapshot table.
+The complete `raw_json` field remains in its stored representation. Other extracted timeline fields and HA historical-correlation values are readable JSON because they are required to reconstruct the timeline.
 
-A manual raw backup is **not** a replacement for a complete Home Assistant backup. It is intended as an additional portable copy of the app's raw snapshot evidence.
+A manual HBI data backup is **not** a replacement for a complete Home Assistant backup. It is an additional portable copy of the app's persistent timeline data.
 
 ### Display period
 
