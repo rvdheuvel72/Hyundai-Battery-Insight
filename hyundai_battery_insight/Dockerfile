@@ -1,4 +1,4 @@
-FROM ghcr.io/home-assistant/base:latest
+FROM ghcr.io/home-assistant/base:3.24
 
 ARG BUILD_VERSION
 ARG BUILD_ARCH
@@ -8,7 +8,10 @@ LABEL \
   io.hass.type="app" \
   io.hass.arch="${BUILD_ARCH}"
 
-RUN apk add --no-cache python3
+RUN apk add --no-cache \
+    python3 \
+    py3-cryptography
+
 COPY app /app
 COPY run.sh /run.sh
 RUN chmod a+x /run.sh
