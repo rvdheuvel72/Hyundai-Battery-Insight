@@ -2,7 +2,6 @@
 
 Local Home Assistant app that correlates Hyundai / Kia vehicle battery information already present in Home Assistant. It never calls Hyundai/Bluelink directly and does not request a vehicle refresh.
 
-
 ## Why I created this
 
 I created Hyundai Battery Insight after repeatedly seeing the 12V battery in my Hyundai drain during periods when the car was used less frequently. If that drain continues for long enough, it can eventually leave the 12V battery effectively dead and the car unable to start. The individual values exposed by Hyundai / Kia Connect were useful, but looking at a single current value did not answer the questions I actually had: **when did the 12V level start dropping, was the car driven in between, did the HV battery level change, and did the 12V battery recover without a recorded trip?**
@@ -20,19 +19,27 @@ A few design goals followed from that:
 
 The project started as a practical diagnostic tool for understanding 12V battery drain over days and weeks, especially during longer standstill periods, and for spotting a downward trend before it ends in a deeply discharged or dead 12V battery. I published it because the same approach may be useful to other Hyundai and Kia owners who already use the Hyundai / Kia Connect integration in Home Assistant.
 
+## Screenshots
 
-## Disclaimer and maintenance
+### Overview and timeline
 
-Hyundai Battery Insight is provided **as-is**. It was created primarily for my own Home Assistant setup and vehicle, and while I have made it available for others who may find it useful, there are no guarantees that it will work with every Hyundai/Kia model, region, integration version or Home Assistant release.
+![Hyundai Battery Insight overview and timeline](docs/images/dashboard-overview.jpg)
 
-There is also **no commitment or guarantee of future updates, maintenance, bug fixes or compatibility changes**. The project may be updated when I have a need for it or when I have time to improve it, but users should not rely on a particular update schedule.
+### Interval analysis and interpretation rules
 
-You are welcome to **fork or clone this repository and modify the app for your own needs**. Vehicle entities, available data and behaviour can differ between cars and Home Assistant installations, so adapting the configuration or code may be appropriate for your setup.
+![Hyundai Battery Insight interval analysis](docs/images/interval-analysis.jpg)
 
-Use the app at your own discretion and verify important conclusions against the underlying Home Assistant and vehicle data.
+The screenshots show example data from the development vehicle. They do not contain a VIN or licence plate.
 
+## Tested setup and compatibility
 
-## Language
+This app was developed and tested against:
+
+- **Hyundai Tucson PHEV, model year 2025**
+- **Home Assistant OS**
+- **Hyundai / Kia Connect** for Home Assistant
+
+Other Hyundai/Kia models, model years, regions and integration versions may expose different entities or payload structures and have not necessarily been tested. The app includes entity auto-detection, but manual configuration may be required for other setups.
 
 The current user interface is **Dutch only**. There is no built-in language selector or English translation at this time.
 
@@ -124,6 +131,44 @@ The default `raw_entity` is specific to the original development vehicle. If you
 For the original development vehicle, auto-detection is expected to find the 12V sensor by its `Car Battery` / `12V` naming, and the known EV Battery Level and Odometer sensors.
 
 Because Hyundai / Kia Connect entity naming can differ by vehicle, account, integration version and region, verify the detected entities in your own Home Assistant installation.
+
+## Privacy and data handling
+
+Hyundai Battery Insight is designed to work locally with data already available in Home Assistant.
+
+- The app reads Home Assistant data through the local Home Assistant/Supervisor API.
+- It does not log in to Hyundai/Kia and does not directly call Hyundai/Bluelink services.
+- Historical data collected by the app is stored locally in the app's Home Assistant data directory using SQLite.
+- The app contains no project telemetry or analytics and does not send vehicle data to an external service operated by this project.
+- CSV and JSON exports are generated only when requested through the app UI.
+
+The separate Hyundai / Kia Connect integration has its own communication and data-handling behaviour; refer to that project's documentation for details.
+
+## Disclaimer and maintenance
+
+Hyundai Battery Insight is provided **as-is**. It was created primarily for my own Home Assistant setup and vehicle, and while I have made it available for others who may find it useful, there are no guarantees that it will work with every Hyundai/Kia model, region, integration version or Home Assistant release.
+
+There is **no commitment or guarantee of future updates, maintenance, bug fixes or compatibility changes**. The project may be updated when I have a need for it or when I have time to improve it, but users should not rely on a particular update schedule.
+
+You are welcome to **fork or clone this repository and modify the app for your own needs** under the MIT License. Vehicle entities, available data and behaviour can differ between cars and Home Assistant installations, so adapting the configuration or code may be appropriate for your setup.
+
+Use the app at your own discretion and verify important conclusions against the underlying Home Assistant and vehicle data.
+
+## Independent project
+
+Hyundai Battery Insight is an independent community project. It is **not affiliated with, endorsed by, or supported by Hyundai, Kia, Home Assistant, or the Hyundai / Kia Connect project**.
+
+Product names and trademarks belong to their respective owners.
+
+## Support and contributions
+
+Issues and pull requests are welcome if you find a bug or want to improve compatibility with another vehicle or Home Assistant setup.
+
+Support is best-effort only. There is no guarantee of a response, fix, feature addition or compatibility update.
+
+## License
+
+Hyundai Battery Insight is released under the [MIT License](LICENSE). You are free to use, fork, modify and redistribute it subject to the license terms.
 
 ## 0.1.7
 
