@@ -989,21 +989,43 @@ def import_raw_history(start, now):
     return count
 
 
-def rebuild_correlated_history(days):
-    """Rebuild the selected display period from detailed history + long-term stats."""
-    days = max(1, min(365, int(days)))
+def _validated_range(start, end, max_days=366):
+    start = iso_to_dt(start) if not isinstance(start, dt.datetime) else start
+    end = iso_to_dt(end) if not isinstance(end, dt.datetime) else end
+    if start is None or end is None:
+        raise ValueError('Ongeldige datum/tijd voor het geselecteerde bereik.')
+    start = start.astimezone(dt.timezone.utc)
+    end = end.astimezone(dt.timezone.utc)
+    if end <= start:
+        raise ValueError('Tot-datum moet na de van-datum liggen.')
+    span_days = (end - start).total_seconds() / 86400.0
+    if span_days > max_days:
+        raise ValueError(f'Een weergavebereik mag maximaal {max_days} dagen zijn.')
+    return start, end
+
+
+def rebuild_correlated_history_range(start, end):
+    """Rebuild exactly the visible range from detailed history + long-term stats."""
+    start, end = _validated_range(start, end)
     with HISTORY_IMPORT_LOCK:
-        now = dt.datetime.now(dt.timezone.utc)
-        start = now - dt.timedelta(days=days)
         correlated = import_correlated_history(
-            start, now, include_statistics=True
+            start, end, include_statistics=True
         )
         return {
-            'days': days,
             'start': start.isoformat(),
-            'end': now.isoformat(),
+            'end': end.isoformat(),
             'correlated': correlated,
         }
+
+
+def rebuild_correlated_history(days):
+    """Backward-compatible trailing-day rebuild."""
+    days = max(1, min(365, int(days)))
+    end = dt.datetime.now(dt.timezone.utc)
+    start = end - dt.timedelta(days=days)
+    result = rebuild_correlated_history_range(start, end)
+    result['days'] = days
+    return result
 
 
 def import_history():
@@ -1135,11 +1157,13 @@ def classify(prev, cur):
     }
 
 
-def _raw_rows(days):
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
+def _raw_rows_range(start, end):
+    start, end = _validated_range(start, end)
     with db() as c:
         rows = [dict(r) for r in c.execute(
-            'SELECT * FROM snapshots WHERE source_ts >= ? ORDER BY source_ts', (cutoff.isoformat(),)
+            'SELECT * FROM snapshots '
+            'WHERE source_ts >= ? AND source_ts < ? ORDER BY source_ts',
+            (start.isoformat(), end.isoformat()),
         ).fetchall()]
     for r in rows:
         r['source_kind'] = 'raw'
@@ -1149,11 +1173,13 @@ def _raw_rows(days):
     return rows
 
 
-def _history_rows(days):
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
+def _history_rows_range(start, end):
+    start, end = _validated_range(start, end)
     with db() as c:
         rows = [dict(r) for r in c.execute(
-            'SELECT * FROM ha_history_points WHERE source_ts >= ? ORDER BY source_ts', (cutoff.isoformat(),)
+            'SELECT * FROM ha_history_points '
+            'WHERE source_ts >= ? AND source_ts < ? ORDER BY source_ts',
+            (start.isoformat(), end.isoformat()),
         ).fetchall()]
     out = []
     for r in rows:
@@ -1173,9 +1199,20 @@ def _history_rows(days):
     return out
 
 
-def query_timeline(days):
-    raw = _raw_rows(days)
-    hist = _history_rows(days)
+def _raw_rows(days):
+    end = dt.datetime.now(dt.timezone.utc)
+    return _raw_rows_range(end - dt.timedelta(days=days), end)
+
+
+def _history_rows(days):
+    end = dt.datetime.now(dt.timezone.utc)
+    return _history_rows_range(end - dt.timedelta(days=days), end)
+
+
+def query_timeline_range(start, end):
+    start, end = _validated_range(start, end)
+    raw = _raw_rows_range(start, end)
+    hist = _history_rows_range(start, end)
     raw_times = sorted(
         iso_to_dt(r['source_ts']) for r in raw if iso_to_dt(r['source_ts'])
     )
@@ -1217,6 +1254,24 @@ def query_timeline(days):
         for i in range(1, len(combined))
     ]
     return combined, intervals, raw
+
+
+def query_timeline(days):
+    end = dt.datetime.now(dt.timezone.utc)
+    return query_timeline_range(end - dt.timedelta(days=days), end)
+
+
+def _request_range(qs, default_days):
+    start_value = qs.get('start', [None])[0]
+    end_value = qs.get('end', [None])[0]
+    if start_value or end_value:
+        if not start_value or not end_value:
+            raise ValueError('Zowel start als end zijn vereist voor een datumbereik.')
+        return _validated_range(start_value, end_value)
+
+    days = max(1, min(365, int(qs.get('days', [default_days])[0])))
+    end = dt.datetime.now(dt.timezone.utc)
+    return end - dt.timedelta(days=days), end
 
 
 def since_last_trip_context(rows, intervals):
@@ -1543,9 +1598,21 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path.rstrip('/') or '/'
         qs = urllib.parse.parse_qs(parsed.query)
         if path == '/api/data':
-            days = max(1, min(365, int(qs.get('days', [OPTIONS['lookback_days']])[0])))
-            rows, intervals, raw_rows = query_timeline(days)
+            try:
+                range_start, range_end = _request_range(
+                    qs, OPTIONS['lookback_days']
+                )
+                rows, intervals, raw_rows = query_timeline_range(
+                    range_start, range_end
+                )
+            except (TypeError, ValueError) as e:
+                self.send_json({'error': str(e)}, 400)
+                return
             self.send_json({
+                'range': {
+                    'start': range_start.isoformat(),
+                    'end': range_end.isoformat(),
+                },
                 'options': OPTIONS,
                 'resolved_entities': RESOLVED_ENTITIES,
                 'current': current_context(raw_rows),
@@ -1577,8 +1644,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({'ok': False, 'error': str(e)}, 500)
             return
         if path == '/api/export.csv':
-            days = max(1, min(365, int(qs.get('days', [OPTIONS['lookback_days']])[0])))
-            rows, _, _ = query_timeline(days)
+            try:
+                range_start, range_end = _request_range(
+                    qs, OPTIONS['lookback_days']
+                )
+                rows, _, _ = query_timeline_range(range_start, range_end)
+            except (TypeError, ValueError) as e:
+                self.send_json({'error': str(e)}, 400)
+                return
             output = io.StringIO()
             fields = [
                 'source_ts', 'source_kind', 'aux_soc', 'hv_battery_level', 'odometer',
@@ -1599,9 +1672,21 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if path == '/api/export.json':
-            days = max(1, min(365, int(qs.get('days', [OPTIONS['lookback_days']])[0])))
-            rows, intervals, _ = query_timeline(days)
+            try:
+                range_start, range_end = _request_range(
+                    qs, OPTIONS['lookback_days']
+                )
+                rows, intervals, _ = query_timeline_range(
+                    range_start, range_end
+                )
+            except (TypeError, ValueError) as e:
+                self.send_json({'error': str(e)}, 400)
+                return
             self.send_json({
+                'range': {
+                    'start': range_start.isoformat(),
+                    'end': range_end.isoformat(),
+                },
                 'snapshots': [public_snapshot(r) for r in rows],
                 'intervals': intervals,
                 'since_last_trip': since_last_trip_context(rows, intervals),
@@ -1638,14 +1723,29 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == '/api/history/rebuild':
             try:
-                days = max(
-                    1, min(
-                        365,
-                        int(qs.get('days', [OPTIONS['lookback_days']])[0])
+                start_value = qs.get('start', [None])[0]
+                end_value = qs.get('end', [None])[0]
+                if start_value or end_value:
+                    if not start_value or not end_value:
+                        raise ValueError(
+                            'Zowel start als end zijn vereist voor een datumbereik.'
+                        )
+                    result = rebuild_correlated_history_range(
+                        start_value, end_value
                     )
-                )
-                result = rebuild_correlated_history(days)
+                else:
+                    days = max(
+                        1, min(
+                            365,
+                            int(qs.get(
+                                'days', [OPTIONS['lookback_days']]
+                            )[0])
+                        )
+                    )
+                    result = rebuild_correlated_history(days)
                 self.send_json({'ok': True, **result})
+            except (TypeError, ValueError) as e:
+                self.send_json({'ok': False, 'error': str(e)}, 400)
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)}, 500)
             return
