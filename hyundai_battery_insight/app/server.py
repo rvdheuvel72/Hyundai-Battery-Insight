@@ -27,6 +27,15 @@ RAW_SECRET_PATH = DATA_DIR / 'raw_payload_secret.bin'
 RAW_FORMAT = 'hbi-fernet-v2'
 LEGACY_RAW_FORMAT = 'hbi-fernet-v1'
 RAW_KDF_CONTEXT = b'Hyundai Battery Insight recoverable raw payload v2\0'
+RAW_BACKUP_FORMAT = 'hbi-raw-backup-v1'
+RAW_BACKUP_MAX_BYTES = 50 * 1024 * 1024
+RAW_BACKUP_COLUMNS = (
+    'source_ts', 'received_ts', 'aux_soc', 'ev_soc', 'ev_soh', 'odometer',
+    'ev_range', 'warning_level', 'sensor_reliability', 'aux_fail_warning',
+    'battery_pre_warning', 'power_state_class_c', 'sleep_mode', 'driving_ready',
+    'accessory', 'ignition1', 'ignition3', 'connector_fastening',
+    'charging_remain_time', 'ev_charging', 'raw_json',
+)
 INGRESS_PROXY_IP = '172.30.32.2'
 VIN_KEY_NAMES = {'vin', 'vehiclevin', 'vinnumber', 'vehicleidentificationnumber'}
 VIN_RE = re.compile(r'^[A-HJ-NPR-Z0-9]{17}$', re.IGNORECASE)
@@ -977,6 +986,117 @@ def since_last_trip_context(rows, intervals):
     }
 
 
+def raw_backup_document():
+    """Build a portable backup of all raw snapshot rows.
+
+    The complete raw_json field remains in its protected-at-rest representation.
+    Extracted timeline fields such as battery percentages, odometer and timestamps
+    are intentionally included so the snapshot rows can be reconstructed exactly.
+    """
+    with db() as conn:
+        rows = [
+            dict(row) for row in conn.execute(
+                'SELECT * FROM snapshots ORDER BY source_ts'
+            ).fetchall()
+        ]
+
+    vehicle_fingerprint = None
+    for row in reversed(rows):
+        value = row.get('raw_json')
+        if not value:
+            continue
+        try:
+            envelope = json.loads(value)
+        except Exception:
+            continue
+        if isinstance(envelope, dict) and envelope.get('vin_fingerprint'):
+            vehicle_fingerprint = envelope.get('vin_fingerprint')
+            break
+
+    return {
+        'format': RAW_BACKUP_FORMAT,
+        'created_at': dt.datetime.now(dt.timezone.utc).isoformat(),
+        'vehicle_fingerprint': vehicle_fingerprint,
+        'snapshot_count': len(rows),
+        'snapshots': [
+            {column: row.get(column) for column in RAW_BACKUP_COLUMNS}
+            for row in rows
+        ],
+    }
+
+
+def _current_vehicle_vin():
+    raw = get_current_state(OPTIONS.get('raw_entity', ''))
+    return find_vin(raw) if raw else None
+
+
+def restore_raw_backup_document(document):
+    """Merge a manual raw backup into the snapshots table by source timestamp."""
+    if not isinstance(document, dict) or document.get('format') != RAW_BACKUP_FORMAT:
+        raise ValueError('Ongeldig raw-backupformaat.')
+
+    snapshots = document.get('snapshots')
+    if not isinstance(snapshots, list):
+        raise ValueError('Raw-backup bevat geen geldige snapshots-lijst.')
+
+    current_vin = _current_vehicle_vin()
+    backup_fingerprint = document.get('vehicle_fingerprint')
+    if current_vin and backup_fingerprint:
+        if backup_fingerprint != _vin_fingerprint(current_vin):
+            raise ValueError('Deze raw-backup hoort bij een ander voertuig (VIN-fingerprint wijkt af).')
+
+    inserted = 0
+    updated = 0
+    skipped = 0
+    cols = list(RAW_BACKUP_COLUMNS)
+    placeholders = ','.join('?' for _ in cols)
+    updates = ','.join(f'{col}=excluded.{col}' for col in cols if col != 'source_ts')
+
+    with db() as conn:
+        for source in snapshots:
+            if not isinstance(source, dict):
+                skipped += 1
+                continue
+
+            row = {column: source.get(column) for column in cols}
+            source_ts = row.get('source_ts')
+            if not isinstance(source_ts, str) or iso_to_dt(source_ts) is None:
+                skipped += 1
+                continue
+
+            raw_value = row.get('raw_json')
+            if raw_value is not None and not isinstance(raw_value, str):
+                skipped += 1
+                continue
+
+            existed = conn.execute(
+                'SELECT 1 FROM snapshots WHERE source_ts=?', (source_ts,)
+            ).fetchone() is not None
+
+            conn.execute(
+                f"INSERT INTO snapshots ({','.join(cols)}) VALUES ({placeholders}) "
+                f"ON CONFLICT(source_ts) DO UPDATE SET {updates}",
+                [row[column] for column in cols],
+            )
+            if existed:
+                updated += 1
+            else:
+                inserted += 1
+        conn.commit()
+
+    # This also upgrades any legacy plaintext rows from older backups.
+    if current_vin:
+        migrate_raw_payloads(current_vin)
+
+    return {
+        'ok': True,
+        'inserted': inserted,
+        'updated': updated,
+        'skipped': skipped,
+        'total_in_file': len(snapshots),
+    }
+
+
 def public_snapshot(r):
     return {
         'source_ts': r.get('source_ts'),
@@ -1031,6 +1151,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_json_download(self, obj, filename):
+        body = json.dumps(obj, ensure_ascii=False, indent=2).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         if not self.client_allowed():
             self.send_json({'error': 'forbidden'}, 403)
@@ -1039,7 +1169,7 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path.rstrip('/') or '/'
         qs = urllib.parse.parse_qs(parsed.query)
         if path == '/api/data':
-            days = max(7, min(365, int(qs.get('days', [OPTIONS['lookback_days']])[0])))
+            days = max(1, min(365, int(qs.get('days', [OPTIONS['lookback_days']])[0])))
             rows, intervals, raw_rows = query_timeline(days)
             self.send_json({
                 'options': OPTIONS,
@@ -1072,7 +1202,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({'ok': False, 'error': str(e)}, 500)
             return
         if path == '/api/export.csv':
-            days = max(7, min(365, int(qs.get('days', [OPTIONS['lookback_days']])[0])))
+            days = max(1, min(365, int(qs.get('days', [OPTIONS['lookback_days']])[0])))
             rows, _, _ = query_timeline(days)
             output = io.StringIO()
             fields = [
@@ -1094,7 +1224,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if path == '/api/export.json':
-            days = max(7, min(365, int(qs.get('days', [OPTIONS['lookback_days']])[0])))
+            days = max(1, min(365, int(qs.get('days', [OPTIONS['lookback_days']])[0])))
             rows, intervals, _ = query_timeline(days)
             self.send_json({
                 'snapshots': [public_snapshot(r) for r in rows],
@@ -1102,6 +1232,13 @@ class Handler(BaseHTTPRequestHandler):
                 'since_last_trip': since_last_trip_context(rows, intervals),
                 'resolved_entities': RESOLVED_ENTITIES,
             })
+            return
+        if path == '/api/raw/backup':
+            backup = raw_backup_document()
+            stamp = dt.datetime.now().strftime('%Y%m%d-%H%M%S')
+            self.send_json_download(
+                backup, f'hyundai-battery-insight-raw-backup-{stamp}.json'
+            )
             return
 
         try:
@@ -1114,6 +1251,38 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         except Exception as e:
             self.send_json({'error': str(e)}, 500)
+
+    def do_POST(self):
+        if not self.client_allowed():
+            self.send_json({'error': 'forbidden'}, 403)
+            return
+
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path.rstrip('/') or '/'
+        if path != '/api/raw/restore':
+            self.send_json({'error': 'not found'}, 404)
+            return
+
+        try:
+            length = int(self.headers.get('Content-Length') or '0')
+        except ValueError:
+            length = 0
+        if length <= 0:
+            self.send_json({'ok': False, 'error': 'Lege restore-aanvraag.'}, 400)
+            return
+        if length > RAW_BACKUP_MAX_BYTES:
+            self.send_json({'ok': False, 'error': 'Raw-backupbestand is te groot.'}, 413)
+            return
+
+        try:
+            body = self.rfile.read(length)
+            document = json.loads(body.decode('utf-8'))
+            result = restore_raw_backup_document(document)
+            self.send_json(result)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
+            self.send_json({'ok': False, 'error': str(e)}, 400)
+        except Exception as e:
+            self.send_json({'ok': False, 'error': str(e)}, 500)
 
 
 def main():
