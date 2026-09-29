@@ -1,5 +1,9 @@
 # Hyundai Battery Insight
 
+<p align="center">
+  <img src="docs/images/battery-insight-logo.png" alt="Battery Insight logo" width="420">
+</p>
+
 Local Home Assistant app that correlates Hyundai / Kia vehicle battery information already present in Home Assistant. It never calls Hyundai/Bluelink directly and does not request a vehicle refresh.
 
 ## Why I created this
@@ -91,7 +95,7 @@ hyundai_battery_insight/
 from this repository to:
 
 ```text
-/local_apps/hyundai_battery_insight
+/addons/hyundai_battery_insight
 ```
 
 Using Terminal & SSH, reload the local App store:
@@ -104,7 +108,7 @@ Then go to **Settings → Apps → Install app**. The app should appear under **
 
 ## Configuration
 
-Version 0.1.7 can auto-detect the relevant Home Assistant sensors. The app configuration also allows explicit entity IDs:
+Version 0.1.8 can auto-detect the relevant Home Assistant sensors. The app configuration also allows explicit entity IDs:
 
 - `raw_entity`: Hyundai / Kia Connect entity containing the nested `vehicle_data` payload. Default: `sensor.tucson_data_2`.
 - `aux_soc_entity`: 12V battery percentage sensor, or `auto`.
@@ -139,8 +143,12 @@ Hyundai Battery Insight is designed to work locally with data already available 
 - The app reads Home Assistant data through the local Home Assistant/Supervisor API.
 - It does not log in to Hyundai/Kia and does not directly call Hyundai/Bluelink services.
 - Historical data collected by the app is stored locally in the app's Home Assistant data directory using SQLite.
+- The complete raw vehicle payload can contain identifiers such as a VIN or licence-plate/registration value. Starting with 0.1.8, raw payloads stored in SQLite are protected with authenticated encryption using a key deterministically derived from the vehicle VIN and an app-specific derivation context.
+- This protection is intentionally **recoverable rather than high-security**: a reinstall can recreate the same key from the same VIN, so preserved/restored raw records do not become unreadable because an installation-local secret was lost. Someone who knows the VIN and has the source code should not be assumed to be cryptographically excluded from the data.
+- Legacy plaintext `raw_json` rows are detected and converted in place when a VIN is available. The temporary pre-release v1 format is also migrated when its old local secret is still present; unreadable rows are never deleted automatically.
+- The protection key is recoverable after reinstall, but the SQLite database itself still needs to survive the reinstall or be restored from a Home Assistant backup. Version 0.1.8 uses a cold app backup to help keep SQLite backups consistent.
 - The app contains no project telemetry or analytics and does not send vehicle data to an external service operated by this project.
-- CSV and JSON exports are generated only when requested through the app UI.
+- CSV and JSON exports are generated only when requested through the app UI and do not include the full protected raw payload.
 
 The separate Hyundai / Kia Connect integration has its own communication and data-handling behaviour; refer to that project's documentation for details.
 
@@ -169,6 +177,21 @@ Support is best-effort only. There is no guarantee of a response, fix, feature a
 ## License
 
 Hyundai Battery Insight is released under the [MIT License](LICENSE). You are free to use, fork, modify and redistribute it subject to the license terms.
+
+For the in-app documentation and version history, see [DOCS.md](hyundai_battery_insight/DOCS.md) and [CHANGELOG.md](hyundai_battery_insight/CHANGELOG.md).
+
+## 0.1.8
+
+- Adds the new original **Battery Insight** icon/logo to the Home Assistant app and repository without using Hyundai/Kia brand marks in the artwork.
+- Fixes the manual local-installation path to `/addons/hyundai_battery_insight`.
+- Restricts the ingress-only HTTP server to requests from the Home Assistant Supervisor ingress proxy.
+- Protects complete raw vehicle payloads at rest with a recoverable VIN-derived authenticated-encryption format.
+- Automatically migrates legacy plaintext raw payloads on startup when a VIN is available.
+- Supports migration of the temporary pre-release v1 encrypted format when its old local secret is still available.
+- Makes the raw-protection key reproducible after reinstall so restored/preserved data is not tied to an installation-local random secret.
+- Uses cold Home Assistant backups for safer SQLite backup consistency.
+- Adds app-level README, documentation, changelog, repository metadata, security guidance and CI validation.
+- Pins the Home Assistant base image to Alpine 3.24 instead of `latest`.
 
 ## 0.1.7
 
