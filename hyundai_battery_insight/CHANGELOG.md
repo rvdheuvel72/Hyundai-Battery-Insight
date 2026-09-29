@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.11
+
+- Makes **Herbouw HA-historie** use the currently selected display period (1/7/14/30/60/90 days) instead of the fixed startup lookback.
+- Keeps raw CCS2 snapshots as the preferred source wherever they exist.
+- Uses detailed Home Assistant Recorder state history where it is still retained.
+- Adds fallback to hourly Home Assistant long-term statistics for the older part of the selected period.
+- Keeps long-term-statistics points explicitly marked as `ha_statistics`; they are not presented as exact raw vehicle snapshots or exact state-change timestamps.
+- Uses mean values for 12V/HV measurement statistics and state (with safe fallbacks) for odometer statistics.
+- Suppresses lower-quality long-term-statistics points when a nearby detailed Recorder point or raw CCS2 snapshot exists.
+- Persists the history source type in the app database and portable data backup.
+- Adds validation for selected-period rebuilds and long-term-statistics reconstruction.
+
 ## 0.1.10
 
 - Changed Home Assistant historical correlation import to additive-only behavior: existing cached `ha_history_points` are never deleted during a Recorder rebuild.
