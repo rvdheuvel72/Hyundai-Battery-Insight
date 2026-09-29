@@ -811,8 +811,22 @@ def import_raw_history(start, now):
     return count
 
 
+def rebuild_correlated_history():
+    """Re-read only the three HA sensor streams and add missing correlation points."""
+    with HISTORY_IMPORT_LOCK:
+        now = dt.datetime.now(dt.timezone.utc)
+        start = now - dt.timedelta(days=OPTIONS['lookback_days'])
+        correlated = import_correlated_history(start, now)
+        return {
+            'lookback_days': OPTIONS['lookback_days'],
+            'start': start.isoformat(),
+            'end': now.isoformat(),
+            'correlated': correlated,
+        }
+
+
 def import_history():
-    """Backfill available Recorder data additively; never prune cached history."""
+    """Backfill raw and three-stream Recorder data additively; never prune cache."""
     with HISTORY_IMPORT_LOCK:
         now = dt.datetime.now(dt.timezone.utc)
         start = now - dt.timedelta(days=OPTIONS['lookback_days'])
@@ -1406,7 +1420,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == '/api/history/rebuild':
             try:
-                result = import_history()
+                result = rebuild_correlated_history()
                 self.send_json({'ok': True, **result})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)}, 500)
