@@ -1,0 +1,45 @@
+name: Publish v0.1.10 release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release-v0.1.10.yml
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create v0.1.10 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > release-notes.md <<'EOF'
+          Hyundai Battery Insight 0.1.10
+
+          History recovery and retention release.
+
+          Highlights:
+          - Rebuilds HA historical correlation from the separate 12V battery, HV Battery Level and odometer Recorder streams.
+          - Historical rebuilds are additive: cached correlation points are no longer deleted when Recorder no longer returns them.
+          - Adds the in-app "Herbouw HA-historie" action with source-stream counts and first/last timestamps.
+          - Existing non-null cached historical values are preserved; rebuilds may only add missing rows or fill missing fields.
+          - Upgrades portable backups to include both raw snapshots and cached HA historical-correlation points.
+          - Keeps restore compatibility with v0.1.9 raw-only backup files.
+          - Renames the portable backup controls to "Data backup" and "Data herstel".
+          - Adds automated tests for additive historical rebuild and full timeline backup/restore.
+
+          Status: experimental.
+
+          Important: recovery of an already-missing historical period depends on those original Home Assistant Recorder sensor states still being available. The app does not invent missing measurements.
+          EOF
+
+          gh release create v0.1.10 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target 2c251cdc84c970026b96fc1803ed0c3ebcda51de \
+            --title "Hyundai Battery Insight 0.1.10" \
+            --notes-file release-notes.md
