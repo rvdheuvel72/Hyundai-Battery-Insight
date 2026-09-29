@@ -35,7 +35,14 @@ Older timeline points can be reconstructed by correlating separate Home Assistan
 
 Version 0.1.10 makes this import **additive**. Re-reading Home Assistant Recorder can insert missing correlation points or fill fields that were previously null, but it no longer deletes cached historical points simply because Recorder no longer returns them.
 
-The **Herbouw HA-historie** button manually runs the same three-stream reconstruction over the configured `lookback_days` period. The result reports how many source events Home Assistant returned for each stream and their first/last timestamps. This makes it possible to see whether an older period is still recoverable from Recorder.
+Starting with version 0.1.11, **Herbouw HA-historie** uses the currently selected dashboard period. Raw CCS2 snapshots remain the preferred source. For timestamps without raw data, the rebuild uses the best Home Assistant source available:
+
+1. detailed Recorder state history where it still exists;
+2. hourly long-term statistics for the older portion that has already been purged from detailed Recorder history.
+
+Long-term-statistics points are stored and displayed as a separate `ha_statistics` source. They are hourly aggregates, not exact vehicle snapshots or exact original state-change timestamps. 12V and HV Battery Level use the hourly mean when available; odometer uses the recorded statistics state when available.
+
+The rebuild result reports the available detailed and long-term source ranges for all three streams. Existing cached correlation points are never deleted by a rebuild.
 
 These correlated values are useful for trends, but they are not treated as equivalent to one raw vehicle snapshot.
 
