@@ -28,6 +28,7 @@ RAW_FORMAT = 'hbi-fernet-v2'
 LEGACY_RAW_FORMAT = 'hbi-fernet-v1'
 RAW_KDF_CONTEXT = b'Hyundai Battery Insight recoverable raw payload v2\0'
 RAW_BACKUP_FORMAT = 'hbi-raw-backup-v1'
+DATA_BACKUP_FORMAT = 'hbi-data-backup-v2'
 RAW_BACKUP_MAX_BYTES = 50 * 1024 * 1024
 RAW_BACKUP_COLUMNS = (
     'source_ts', 'received_ts', 'aux_soc', 'ev_soc', 'ev_soh', 'odometer',
@@ -35,6 +36,10 @@ RAW_BACKUP_COLUMNS = (
     'battery_pre_warning', 'power_state_class_c', 'sleep_mode', 'driving_ready',
     'accessory', 'ignition1', 'ignition3', 'connector_fastening',
     'charging_remain_time', 'ev_charging', 'raw_json',
+)
+HISTORY_BACKUP_COLUMNS = (
+    'source_ts', 'aux_soc', 'ev_soc', 'odometer',
+    'aux_source_ts', 'ev_source_ts', 'odometer_source_ts', 'imported_ts',
 )
 INGRESS_PROXY_IP = '172.30.32.2'
 VIN_KEY_NAMES = {'vin', 'vehiclevin', 'vinnumber', 'vehicleidentificationnumber'}
@@ -89,6 +94,7 @@ def load_options():
 
 OPTIONS = load_options()
 RESOLVED_ENTITIES = {'aux_soc': None, 'hv_battery': None, 'odometer': None}
+HISTORY_IMPORT_LOCK = threading.Lock()
 
 
 def db():
@@ -484,16 +490,43 @@ def upsert_snapshot(s):
 
 
 def upsert_history_point(p):
+    """Add a correlation point without destroying previously cached evidence.
+
+    Existing non-null values win. A later Recorder import may fill fields that were
+    previously null, but it never replaces a value that was already stored.
+    """
     cols = list(p.keys())
     placeholders = ','.join('?' for _ in cols)
-    updates = ','.join(f'{c}=excluded.{c}' for c in cols if c != 'source_ts')
+    merge_cols = [c for c in cols if c not in ('source_ts', 'imported_ts')]
+    updates = ','.join(
+        f'{c}=COALESCE(ha_history_points.{c}, excluded.{c})'
+        for c in merge_cols
+    )
+    if 'imported_ts' in cols:
+        updates += (
+            (',' if updates else '') +
+            'imported_ts=COALESCE(ha_history_points.imported_ts, excluded.imported_ts)'
+        )
+
     with db() as c:
+        before = c.execute(
+            'SELECT * FROM ha_history_points WHERE source_ts=?', (p['source_ts'],)
+        ).fetchone()
         c.execute(
             f"INSERT INTO ha_history_points ({','.join(cols)}) VALUES ({placeholders}) "
             f"ON CONFLICT(source_ts) DO UPDATE SET {updates}",
-            [p[c] for c in cols],
+            [p[col] for col in cols],
         )
+        after = c.execute(
+            'SELECT * FROM ha_history_points WHERE source_ts=?', (p['source_ts'],)
+        ).fetchone()
         c.commit()
+
+    if before is None:
+        return 'inserted'
+    if dict(before) != dict(after):
+        return 'enriched'
+    return 'unchanged'
 
 
 def get_current_state(entity_id):
@@ -677,35 +710,61 @@ def _value_at(events, t, near_seconds=120):
     return None, None
 
 
+def _history_event_summary(events):
+    if not events:
+        return {'count': 0, 'first': None, 'last': None}
+    return {
+        'count': len(events),
+        'first': events[0]['ts'],
+        'last': events[-1]['ts'],
+    }
+
+
 def import_correlated_history(start, now):
+    """Add all currently available three-stream HA history without deleting cache."""
     entities = resolve_history_entities()
     aux_events = _history_events(entities.get('aux_soc'), start, now)
     hv_events = _history_events(entities.get('hv_battery'), start, now)
     odo_events = _history_events(entities.get('odometer'), start, now)
 
+    result = {
+        'resolved_entities': dict(entities),
+        'source_events': {
+            'aux_soc': _history_event_summary(aux_events),
+            'hv_battery': _history_event_summary(hv_events),
+            'odometer': _history_event_summary(odo_events),
+        },
+        'candidate_points': 0,
+        'inserted': 0,
+        'enriched': 0,
+        'unchanged': 0,
+    }
+
     if not aux_events:
-        print('[history] no numeric 12V sensor history found; raw CCS2 history remains available', flush=True)
-        return
+        print(
+            '[history] no numeric 12V sensor history found; existing correlation '
+            'cache and raw CCS2 history are preserved',
+            flush=True,
+        )
+        return result
 
     cluster_times = _cluster_event_times([aux_events, hv_events, odo_events])
     imported_ts = dt.datetime.now(dt.timezone.utc).isoformat()
-    with db() as c:
-        c.execute('DELETE FROM ha_history_points WHERE source_ts >= ?', (start.isoformat(),))
-        c.commit()
-
-    count = 0
     last_signature = None
+
     for t in cluster_times:
         aux, aux_ts = _value_at(aux_events, t)
         hv, hv_ts = _value_at(hv_events, t)
         odo, odo_ts = _value_at(odo_events, t)
         if aux is None:
             continue
+
         signature = (aux, hv, odo)
         # Skip a cluster that changes no tracked value after carry-forward.
         if signature == last_signature:
             continue
         last_signature = signature
+
         p = {
             'source_ts': t.astimezone(dt.timezone.utc).isoformat(),
             'aux_soc': aux,
@@ -716,15 +775,24 @@ def import_correlated_history(start, now):
             'odometer_source_ts': odo_ts,
             'imported_ts': imported_ts,
         }
-        upsert_history_point(p)
-        count += 1
-    print(f'[history] built {count} HA historical correlation points', flush=True)
+        status = upsert_history_point(p)
+        result['candidate_points'] += 1
+        result[status] += 1
+
+    print(
+        '[history] additive three-stream correlation: '
+        f"candidates={result['candidate_points']}, "
+        f"inserted={result['inserted']}, enriched={result['enriched']}, "
+        f"unchanged={result['unchanged']}",
+        flush=True,
+    )
+    return result
 
 
 def import_raw_history(start, now):
     entity = OPTIONS.get('raw_entity', '')
     if not entity:
-        return
+        return 0
     cur = start
     count = 0
     while cur < now:
@@ -740,13 +808,23 @@ def import_raw_history(start, now):
             print(f'[history:raw] {cur.isoformat()}..{end.isoformat()}: {e}', flush=True)
         cur = end
     print(f'[history] processed {count} raw CCS2 history states', flush=True)
+    return count
 
 
 def import_history():
-    now = dt.datetime.now(dt.timezone.utc)
-    start = now - dt.timedelta(days=OPTIONS['lookback_days'])
-    import_raw_history(start, now)
-    import_correlated_history(start, now)
+    """Backfill available Recorder data additively; never prune cached history."""
+    with HISTORY_IMPORT_LOCK:
+        now = dt.datetime.now(dt.timezone.utc)
+        start = now - dt.timedelta(days=OPTIONS['lookback_days'])
+        raw_count = import_raw_history(start, now)
+        correlated = import_correlated_history(start, now)
+        return {
+            'lookback_days': OPTIONS['lookback_days'],
+            'start': start.isoformat(),
+            'end': now.isoformat(),
+            'raw_processed': raw_count,
+            'correlated': correlated,
+        }
 
 
 def poll_loop():
@@ -987,16 +1065,21 @@ def since_last_trip_context(rows, intervals):
 
 
 def raw_backup_document():
-    """Build a portable backup of all raw snapshot rows.
+    """Build a portable app-data backup of raw and correlated history.
 
-    The complete raw_json field remains in its protected-at-rest representation.
-    Extracted timeline fields such as battery percentages, odometer and timestamps
-    are intentionally included so the snapshot rows can be reconstructed exactly.
+    The v2 format keeps the endpoint name for backward UI compatibility, but it
+    now contains both persistent timeline tables. Legacy v1 raw-only backups
+    remain restorable.
     """
     with db() as conn:
         rows = [
             dict(row) for row in conn.execute(
                 'SELECT * FROM snapshots ORDER BY source_ts'
+            ).fetchall()
+        ]
+        history_rows = [
+            dict(row) for row in conn.execute(
+                'SELECT * FROM ha_history_points ORDER BY source_ts'
             ).fetchall()
         ]
 
@@ -1014,13 +1097,18 @@ def raw_backup_document():
             break
 
     return {
-        'format': RAW_BACKUP_FORMAT,
+        'format': DATA_BACKUP_FORMAT,
         'created_at': dt.datetime.now(dt.timezone.utc).isoformat(),
         'vehicle_fingerprint': vehicle_fingerprint,
         'snapshot_count': len(rows),
+        'history_point_count': len(history_rows),
         'snapshots': [
             {column: row.get(column) for column in RAW_BACKUP_COLUMNS}
             for row in rows
+        ],
+        'ha_history_points': [
+            {column: row.get(column) for column in HISTORY_BACKUP_COLUMNS}
+            for row in history_rows
         ],
     }
 
@@ -1031,26 +1119,43 @@ def _current_vehicle_vin():
 
 
 def restore_raw_backup_document(document):
-    """Merge a manual raw backup into the snapshots table by source timestamp."""
-    if not isinstance(document, dict) or document.get('format') != RAW_BACKUP_FORMAT:
-        raise ValueError('Ongeldig raw-backupformaat.')
+    """Merge v1 raw-only or v2 full-data backup into local persistent tables."""
+    if not isinstance(document, dict):
+        raise ValueError('Ongeldig HBI-backupformaat.')
+
+    backup_format = document.get('format')
+    if backup_format not in (RAW_BACKUP_FORMAT, DATA_BACKUP_FORMAT):
+        raise ValueError('Ongeldig HBI-backupformaat.')
 
     snapshots = document.get('snapshots')
     if not isinstance(snapshots, list):
-        raise ValueError('Raw-backup bevat geen geldige snapshots-lijst.')
+        raise ValueError('HBI-backup bevat geen geldige snapshots-lijst.')
+
+    history_points = (
+        document.get('ha_history_points', [])
+        if backup_format == DATA_BACKUP_FORMAT else []
+    )
+    if not isinstance(history_points, list):
+        raise ValueError('HBI-backup bevat geen geldige HA-historie-lijst.')
 
     current_vin = _current_vehicle_vin()
     backup_fingerprint = document.get('vehicle_fingerprint')
     if current_vin and backup_fingerprint:
         if backup_fingerprint != _vin_fingerprint(current_vin):
-            raise ValueError('Deze raw-backup hoort bij een ander voertuig (VIN-fingerprint wijkt af).')
+            raise ValueError('Deze HBI-backup hoort bij een ander voertuig (VIN-fingerprint wijkt af).')
 
     inserted = 0
     updated = 0
     skipped = 0
     cols = list(RAW_BACKUP_COLUMNS)
     placeholders = ','.join('?' for _ in cols)
-    updates = ','.join(f'{col}=excluded.{col}' for col in cols if col != 'source_ts')
+    updates = ','.join(
+        (
+            'raw_json=COALESCE(excluded.raw_json,snapshots.raw_json)'
+            if col == 'raw_json' else f'{col}=excluded.{col}'
+        )
+        for col in cols if col != 'source_ts'
+    )
 
     with db() as conn:
         for source in snapshots:
@@ -1084,16 +1189,55 @@ def restore_raw_backup_document(document):
                 inserted += 1
         conn.commit()
 
+    history_inserted = 0
+    history_enriched = 0
+    history_unchanged = 0
+    history_skipped = 0
+    for source in history_points:
+        if not isinstance(source, dict):
+            history_skipped += 1
+            continue
+        row = {column: source.get(column) for column in HISTORY_BACKUP_COLUMNS}
+        source_ts = row.get('source_ts')
+        if not isinstance(source_ts, str) or iso_to_dt(source_ts) is None:
+            history_skipped += 1
+            continue
+        bad_ts = False
+        for key in ('aux_source_ts', 'ev_source_ts', 'odometer_source_ts', 'imported_ts'):
+            value = row.get(key)
+            if value is not None and (
+                not isinstance(value, str) or iso_to_dt(value) is None
+            ):
+                bad_ts = True
+                break
+        if bad_ts:
+            history_skipped += 1
+            continue
+
+        status = upsert_history_point(row)
+        if status == 'inserted':
+            history_inserted += 1
+        elif status == 'enriched':
+            history_enriched += 1
+        else:
+            history_unchanged += 1
+
     # This also upgrades any legacy plaintext rows from older backups.
     if current_vin:
         migrate_raw_payloads(current_vin)
 
     return {
         'ok': True,
+        'format': backup_format,
         'inserted': inserted,
         'updated': updated,
         'skipped': skipped,
         'total_in_file': len(snapshots),
+        'history_inserted': history_inserted,
+        'history_enriched': history_enriched,
+        'history_unchanged': history_unchanged,
+        'history_skipped': history_skipped,
+        'history_total_in_file': len(history_points),
     }
 
 
@@ -1237,7 +1381,7 @@ class Handler(BaseHTTPRequestHandler):
             backup = raw_backup_document()
             stamp = dt.datetime.now().strftime('%Y%m%d-%H%M%S')
             self.send_json_download(
-                backup, f'hyundai-battery-insight-raw-backup-{stamp}.json'
+                backup, f'hyundai-battery-insight-data-backup-{stamp}.json'
             )
             return
 
@@ -1259,6 +1403,15 @@ class Handler(BaseHTTPRequestHandler):
 
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip('/') or '/'
+
+        if path == '/api/history/rebuild':
+            try:
+                result = import_history()
+                self.send_json({'ok': True, **result})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)}, 500)
+            return
+
         if path != '/api/raw/restore':
             self.send_json({'error': 'not found'}, 404)
             return
