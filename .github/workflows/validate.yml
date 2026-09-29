@@ -77,6 +77,93 @@ jobs:
           print("reinstall-safe raw protection: OK")
           PY
 
+      - name: Test manual raw backup and restore
+        run: |
+          python - <<'PY'
+          import importlib.util
+          import tempfile
+          from pathlib import Path
+
+          path = Path("hyundai_battery_insight/app/server.py")
+          spec = importlib.util.spec_from_file_location("hbi_backup_test", path)
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+
+          with tempfile.TemporaryDirectory() as tmp:
+              module.DATA_DIR = Path(tmp)
+              module.DB_PATH = module.DATA_DIR / "hbi.db"
+              module.init_db()
+
+              vin = "AAAAAAAAAAAAAAAAA"
+              raw = module.protect_raw_payload(
+                  {"VIN": vin, "Electronics": {"Battery": {"Level": 65}}},
+                  vin,
+              )
+              snapshot = {
+                  "source_ts": "2026-09-29T08:00:00+00:00",
+                  "received_ts": "2026-09-29T08:00:01+00:00",
+                  "aux_soc": 65.0,
+                  "ev_soc": 72.0,
+                  "ev_soh": None,
+                  "odometer": 16684.8,
+                  "ev_range": None,
+                  "warning_level": 65.0,
+                  "sensor_reliability": None,
+                  "aux_fail_warning": None,
+                  "battery_pre_warning": None,
+                  "power_state_class_c": None,
+                  "sleep_mode": None,
+                  "driving_ready": None,
+                  "accessory": None,
+                  "ignition1": None,
+                  "ignition3": None,
+                  "connector_fastening": None,
+                  "charging_remain_time": None,
+                  "ev_charging": None,
+                  "raw_json": raw,
+              }
+              module.upsert_snapshot(snapshot)
+
+              backup = module.raw_backup_document()
+              assert backup["format"] == module.RAW_BACKUP_FORMAT
+              assert backup["snapshot_count"] == 1
+              assert backup["vehicle_fingerprint"] == module._vin_fingerprint(vin)
+              assert backup["snapshots"][0]["raw_json"] == raw
+
+              with module.db() as conn:
+                  conn.execute("DELETE FROM snapshots")
+                  conn.commit()
+
+              result = module.restore_raw_backup_document(backup)
+              assert result["inserted"] == 1
+              assert result["updated"] == 0
+              with module.db() as conn:
+                  row = conn.execute(
+                      "SELECT aux_soc, odometer, raw_json FROM snapshots"
+                  ).fetchone()
+              assert row["aux_soc"] == 65.0
+              assert row["odometer"] == 16684.8
+              assert row["raw_json"] == raw
+
+          print("manual raw backup/restore: OK")
+          PY
+
+      - name: Check UI day selector
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          html = Path("hyundai_battery_insight/app/index.html").read_text(encoding="utf-8")
+          match = re.search(r'<select id="days">(.*?)</select>', html)
+          assert match, "days selector not found"
+          values = [int(v) for v in re.findall(r'<option(?: selected)?>(\d+)</option>', match.group(1))]
+          assert values == [1, 7, 14, 30, 60, 90], values
+          assert 'id="rawBackup"' in html
+          assert 'id="rawRestore"' in html
+          print("UI day selector and raw backup controls: OK")
+          PY
+
       - name: Check app presentation files
         run: |
           test -f hyundai_battery_insight/icon.png
