@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.10
+
+- Changed Home Assistant historical correlation import to additive-only behavior: existing cached `ha_history_points` are never deleted during a Recorder rebuild.
+- Added a manual **Herbouw HA-historie** action that re-reads the available 12V battery, HV Battery Level and odometer histories and adds missing correlation points.
+- Rebuild results report the number and first/last timestamp of source events found for each of the three sensor streams.
+- Correlation upserts preserve existing non-null values and only fill previously missing fields.
+- Extended the portable backup format to `hbi-data-backup-v2`, containing both raw `snapshots` and cached `ha_history_points`.
+- Kept restore compatibility with existing `hbi-raw-backup-v1` files.
+- Renamed the UI controls to **Data backup** and **Data herstel** to reflect the complete persistent timeline backup.
+- Added CI tests proving cached historical points survive a rebuild and that both persistent tables round-trip through backup/restore.
+
 ## 0.1.9
 
 - Added manual raw snapshot backup and restore from the app UI.
