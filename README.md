@@ -108,7 +108,7 @@ Then go to **Settings → Apps → Install app**. The app should appear under **
 
 ## Configuration
 
-Version 0.1.8 can auto-detect the relevant Home Assistant sensors. The app configuration also allows explicit entity IDs:
+Version 0.1.9 can auto-detect the relevant Home Assistant sensors. The app configuration also allows explicit entity IDs:
 
 - `raw_entity`: Hyundai / Kia Connect entity containing the nested `vehicle_data` payload. Default: `sensor.tucson_data_2`.
 - `aux_soc_entity`: 12V battery percentage sensor, or `auto`.
@@ -146,7 +146,9 @@ Hyundai Battery Insight is designed to work locally with data already available 
 - The complete raw vehicle payload can contain identifiers such as a VIN or licence-plate/registration value. Starting with 0.1.8, raw payloads stored in SQLite are protected with authenticated encryption using a key deterministically derived from the vehicle VIN and an app-specific derivation context.
 - This protection is intentionally **recoverable rather than high-security**: a reinstall can recreate the same key from the same VIN, so preserved/restored raw records do not become unreadable because an installation-local secret was lost. Someone who knows the VIN and has the source code should not be assumed to be cryptographically excluded from the data.
 - Legacy plaintext `raw_json` rows are detected and converted in place when a VIN is available. The temporary pre-release v1 format is also migrated when its old local secret is still present; unreadable rows are never deleted automatically.
-- The protection key is recoverable after reinstall, but the SQLite database itself still needs to survive the reinstall or be restored from a Home Assistant backup. Version 0.1.8 uses a cold app backup to help keep SQLite backups consistent.
+- The protection key is recoverable after reinstall, but the SQLite database itself still needs to survive the reinstall or be restored from a Home Assistant backup. Version 0.1.8+ uses a cold app backup to help keep SQLite backups consistent.
+- Starting with 0.1.9, the UI also provides a manual **Raw backup** / **Raw herstel** option. This exports all rows from the raw snapshot store to a JSON backup and can merge them back later by vehicle timestamp. Existing timestamps are updated from the backup; snapshots not present in the backup are left untouched.
+- Manual raw backups keep the complete `raw_json` field in its protected form. Timeline fields such as timestamps, battery values and odometer are included in readable form so snapshot rows can be reconstructed.
 - The app contains no project telemetry or analytics and does not send vehicle data to an external service operated by this project.
 - CSV and JSON exports are generated only when requested through the app UI and do not include the full protected raw payload.
 
@@ -179,6 +181,16 @@ Support is best-effort only. There is no guarantee of a response, fix, feature a
 Hyundai Battery Insight is released under the [MIT License](LICENSE). You are free to use, fork, modify and redistribute it subject to the license terms.
 
 For the in-app documentation and version history, see [DOCS.md](hyundai_battery_insight/DOCS.md) and [CHANGELOG.md](hyundai_battery_insight/CHANGELOG.md).
+
+## 0.1.9
+
+- Adds manual **Raw backup** and **Raw herstel** controls to the UI.
+- Raw backup exports all stored raw snapshot rows, independent of the selected display period.
+- Restore merges by `source_ts`: matching timestamps are updated and other existing snapshots are preserved.
+- Adds restore validation for backup format, known snapshot fields, valid timestamps, maximum upload size and vehicle fingerprint when the current VIN is available.
+- Keeps protected `raw_json` ciphertext protected inside the manual backup.
+- Changes the day selector to **1, 7, 14, 30, 60 and 90 days** and allows 1-day API queries.
+- Adds CI coverage for manual raw backup/restore round trips.
 
 ## 0.1.8
 
