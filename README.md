@@ -20,6 +20,17 @@ A few design goals followed from that:
 
 The project started as a practical diagnostic tool for understanding 12V battery behaviour over days and weeks, especially during longer standstill periods. I published it because the same approach may be useful to other Hyundai and Kia owners who already use the Hyundai / Kia Connect integration in Home Assistant.
 
+
+## Disclaimer and maintenance
+
+Hyundai Battery Insight is provided **as-is**. It was created primarily for my own Home Assistant setup and vehicle, and while I have made it available for others who may find it useful, there are no guarantees that it will work with every Hyundai/Kia model, region, integration version or Home Assistant release.
+
+There is also **no commitment or guarantee of future updates, maintenance, bug fixes or compatibility changes**. The project may be updated when I have a need for it or when I have time to improve it, but users should not rely on a particular update schedule.
+
+You are welcome to **fork or clone this repository and modify the app for your own needs**. Vehicle entities, available data and behaviour can differ between cars and Home Assistant installations, so adapting the configuration or code may be appropriate for your setup.
+
+Use the app at your own discretion and verify important conclusions against the underlying Home Assistant and vehicle data.
+
 ## Requirements
 
 - **Home Assistant OS**. Home Assistant Apps are available on Home Assistant OS.
