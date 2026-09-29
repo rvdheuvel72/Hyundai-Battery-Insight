@@ -377,6 +377,120 @@ jobs:
           print("long-term statistics selected-period rebuild: OK")
           PY
 
+      - name: Test explicit timeline ranges
+        run: |
+          python - <<'PY'
+          import datetime as dt
+          import importlib.util
+          import tempfile
+          from pathlib import Path
+
+          path = Path("hyundai_battery_insight/app/server.py")
+          spec = importlib.util.spec_from_file_location("hbi_range_test", path)
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+
+          def snapshot(ts, aux):
+              return {
+                  "source_ts": ts,
+                  "received_ts": ts,
+                  "aux_soc": aux,
+                  "ev_soc": 70.0,
+                  "ev_soh": None,
+                  "odometer": 16000.0,
+                  "ev_range": None,
+                  "warning_level": None,
+                  "sensor_reliability": None,
+                  "aux_fail_warning": None,
+                  "battery_pre_warning": None,
+                  "power_state_class_c": None,
+                  "sleep_mode": None,
+                  "driving_ready": None,
+                  "accessory": None,
+                  "ignition1": None,
+                  "ignition3": None,
+                  "connector_fastening": None,
+                  "charging_remain_time": None,
+                  "ev_charging": None,
+                  "raw_json": None,
+              }
+
+          with tempfile.TemporaryDirectory() as tmp:
+              module.DATA_DIR = Path(tmp)
+              module.DB_PATH = module.DATA_DIR / "hbi.db"
+              module.init_db()
+
+              module.upsert_snapshot(snapshot(
+                  "2026-09-13T12:00:00+00:00", 60.0
+              ))
+              module.upsert_snapshot(snapshot(
+                  "2026-09-15T12:00:00+00:00", 58.0
+              ))
+              module.upsert_snapshot(snapshot(
+                  "2026-09-18T12:00:00+00:00", 56.0
+              ))
+              module.upsert_history_point({
+                  "source_ts": "2026-09-16T12:00:00+00:00",
+                  "aux_soc": 57.0,
+                  "ev_soc": 70.0,
+                  "odometer": 16000.0,
+                  "aux_source_ts": "2026-09-16T12:00:00+00:00",
+                  "ev_source_ts": "2026-09-16T12:00:00+00:00",
+                  "odometer_source_ts": "2026-09-16T12:00:00+00:00",
+                  "imported_ts": "2026-09-16T12:01:00+00:00",
+                  "source_kind": "ha_history",
+              })
+
+              start = dt.datetime(
+                  2026, 9, 14, 0, 0, tzinfo=dt.timezone.utc
+              )
+              end = dt.datetime(
+                  2026, 9, 17, 0, 0, tzinfo=dt.timezone.utc
+              )
+              rows, intervals, raw = module.query_timeline_range(start, end)
+              assert [r["source_ts"] for r in raw] == [
+                  "2026-09-15T12:00:00+00:00"
+              ]
+              assert [r["source_ts"] for r in rows] == [
+                  "2026-09-15T12:00:00+00:00",
+                  "2026-09-16T12:00:00+00:00",
+              ]
+              assert len(intervals) == 1
+
+              resolved_start, resolved_end = module._request_range({
+                  "start": ["2026-09-14T00:00:00+00:00"],
+                  "end": ["2026-09-17T00:00:00+00:00"],
+              }, 90)
+              assert resolved_start == start
+              assert resolved_end == end
+
+              captured = {}
+              def fake_import(a, b, include_statistics=False):
+                  captured["start"] = a
+                  captured["end"] = b
+                  captured["statistics"] = include_statistics
+                  return {"inserted": 0}
+
+              module.import_correlated_history = fake_import
+              result = module.rebuild_correlated_history_range(start, end)
+              assert result["start"] == start.isoformat()
+              assert result["end"] == end.isoformat()
+              assert captured["start"] == start
+              assert captured["end"] == end
+              assert captured["statistics"] is True
+
+              try:
+                  module._validated_range(
+                      start, start + dt.timedelta(days=367)
+                  )
+              except ValueError:
+                  pass
+              else:
+                  raise AssertionError("range longer than 366 days was accepted")
+
+          print("explicit timeline ranges: OK")
+          PY
+
       - name: Check UI day selector
         run: |
           python - <<'PY'
@@ -391,8 +505,15 @@ jobs:
           assert 'id="rawBackup"' in html
           assert 'id="rawRestore"' in html
           assert 'id="historyRebuild"' in html
+          assert 'id="prevRange"' in html
+          assert 'id="todayRange"' in html
+          assert 'id="nextRange"' in html
+          assert 'id="fromDate"' in html
+          assert 'id="toDate"' in html
+          assert 'id="applyRange"' in html
+          assert '<option selected>14</option>' in html
           assert 'Data backup' in html
-          print("UI day selector, data backup and history rebuild controls: OK")
+          print("UI day selector, range navigation, custom dates and backup controls: OK")
           PY
 
       - name: Check app presentation files
