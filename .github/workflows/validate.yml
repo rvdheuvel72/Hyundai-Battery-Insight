@@ -42,6 +42,41 @@ jobs:
       - name: Validate shell script
         run: bash -n hyundai_battery_insight/run.sh
 
+      - name: Test reinstall-safe raw protection
+        run: |
+          python - <<'PY'
+          import importlib.util
+          from pathlib import Path
+
+          path = Path("hyundai_battery_insight/app/server.py")
+
+          def load_module(name):
+              spec = importlib.util.spec_from_file_location(name, path)
+              module = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(module)
+              return module
+
+          first = load_module("hbi_first")
+          vin = "AAAAAAAAAAAAAAAAA"
+          payload = {"VIN": vin, "Electronics": {"Battery": {"Level": 65}}}
+          protected = first.protect_raw_payload(payload, vin)
+          assert protected
+          assert first.decrypt_raw_payload(protected, vin) == payload
+
+          # Simulate a fresh install/process: reload the code with no shared state.
+          second = load_module("hbi_second")
+          assert second.decrypt_raw_payload(protected, vin) == payload
+
+          try:
+              second.decrypt_raw_payload(protected, "BBBBBBBBBBBBBBBBB")
+          except Exception:
+              pass
+          else:
+              raise AssertionError("payload decrypted with a different VIN")
+
+          print("reinstall-safe raw protection: OK")
+          PY
+
       - name: Check app presentation files
         run: |
           test -f hyundai_battery_insight/icon.png
