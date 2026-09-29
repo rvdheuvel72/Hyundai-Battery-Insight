@@ -1,20 +1,79 @@
 # Hyundai Battery Insight
 
-Local Home Assistant app that correlates Hyundai/Kia Connect / CCS2 battery information already present in Home Assistant. It never calls Hyundai/Bluelink directly and does not request a vehicle refresh.
+Local Home Assistant app that correlates Hyundai / Kia vehicle battery information already present in Home Assistant. It never calls Hyundai/Bluelink directly and does not request a vehicle refresh.
 
-## Local installation
+## Requirements
 
-With the current Terminal & SSH app, extract/copy this directory to:
+- **Home Assistant OS**. Home Assistant Apps are available on Home Assistant OS.
+- **Hyundai / Kia Connect** installed and configured in Home Assistant:
+  - GitHub: https://github.com/Hyundai-Kia-Connect/kia_uvo
+  - The upstream project is installed through HACS; its current instructions use the name **Kia Uvo** in HACS and in **Settings → Devices & Services → Integrations**.
+- A working Hyundai / Kia Connect vehicle entry exposing the battery/vehicle entities used by this app.
+- Home Assistant Recorder history is required for the extended historical correlation view.
 
-`/local_apps/hyundai_battery_insight`
+Hyundai Battery Insight reads data already available in Home Assistant. It does **not** authenticate against Hyundai/Kia itself.
 
-Then run:
+## Installation
+
+### Recommended: add this repository to Home Assistant
+
+This repository is structured as a Home Assistant third-party App repository. For Home Assistant to fetch it directly from GitHub, this repository must be publicly accessible.
+
+Repository URL:
+
+```text
+https://github.com/rvdheuvel72/Hyundai-Battery-Insight
+```
+
+1. In Home Assistant, go to **Settings → Apps**.
+2. Select **Install app**.
+3. Open the **⋮** menu in the top-right corner and select **Repositories**.
+4. Paste the repository URL above and select **Add**.
+5. Return to the App store.
+6. Open **Hyundai Battery Insight** and select **Install**.
+7. After installation, review the app configuration.
+8. Start the app.
+9. Open **Web UI**. Optionally enable **Show in sidebar**.
+
+If the repository or app does not appear immediately, refresh the Home Assistant browser UI. For repository errors, check **Settings → System → Logs** and select the Supervisor log.
+
+### Manual / local installation
+
+You can also install the app without adding the GitHub repository.
+
+Copy the contents of:
+
+```text
+hyundai_battery_insight/
+```
+
+from this repository to:
+
+```text
+/local_apps/hyundai_battery_insight
+```
+
+Using Terminal & SSH, reload the local App store:
 
 ```sh
 ha store reload
 ```
 
-Open **Settings → Apps → Install app**. It should appear under **Local apps** as **Hyundai Battery Insight**.
+Then go to **Settings → Apps → Install app**. The app should appear under **Local apps** as **Hyundai Battery Insight**.
+
+## Configuration
+
+Version 0.1.7 can auto-detect the relevant Home Assistant sensors. The app configuration also allows explicit entity IDs:
+
+- `raw_entity`: Hyundai / Kia Connect entity containing the nested `vehicle_data` payload. Default: `sensor.tucson_data_2`.
+- `aux_soc_entity`: 12V battery percentage sensor, or `auto`.
+- `hv_battery_entity`: EV/HV battery level sensor, or `auto`.
+- `odometer_entity`: odometer sensor, or `auto`.
+- `lookback_days`: historical lookback period.
+- `poll_seconds`: Home Assistant polling interval used by this app.
+- `import_on_start`: import available Home Assistant history when the app starts.
+
+The default `raw_entity` is specific to the original development vehicle. If your Hyundai / Kia Connect entity IDs differ, set the appropriate entity explicitly in the app configuration.
 
 ## Evidence model
 
@@ -28,13 +87,9 @@ Open **Settings → Apps → Install app**. It should appear under **Local apps*
 
 ## History entities
 
-Version 0.1.7 can auto-detect the relevant Home Assistant sensors. The app configuration also allows explicit entity IDs:
+For the original development vehicle, auto-detection is expected to find the 12V sensor by its `Car Battery` / `12V` naming, and the known EV Battery Level and Odometer sensors.
 
-- `aux_soc_entity`: 12V battery percentage sensor, or `auto`
-- `hv_battery_entity`: EV/HV battery level sensor, or `auto`
-- `odometer_entity`: odometer sensor, or `auto`
-
-For this vehicle, auto-detection is expected to find the 12V sensor by its `Car Battery`/`12V` naming, and the known EV Battery Level and Odometer sensors.
+Because Hyundai / Kia Connect entity naming can differ by vehicle, account, integration version and region, verify the detected entities in your own Home Assistant installation.
 
 ## 0.1.7
 
