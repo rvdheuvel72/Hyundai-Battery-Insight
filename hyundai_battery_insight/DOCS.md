@@ -98,9 +98,18 @@ The complete `raw_json` field remains in its stored representation. Other extrac
 
 A manual HBI data backup is **not** a replacement for a complete Home Assistant backup. It is an additional portable copy of the app's persistent timeline data.
 
-### Display period
+### Display period and date navigation
 
-The UI period selector offers **1, 7, 14, 30, 60 and 90 days**. This only changes what is displayed/exported through the normal timeline CSV/JSON views; it does not delete older stored raw snapshots.
+The UI period selector offers **1, 7, 14, 30, 60 and 90 days**. Version 0.1.12 treats this as a visible window rather than only a trailing period ending at the present.
+
+- **Vorige** moves the complete visible window backward by its current width.
+- **Volgende** moves it forward by the same width and stops at today.
+- **Vandaag** aligns the current window with today.
+- **Van** / **Tot** can define a custom inclusive date range, up to 366 days.
+- The graph x-axis uses the complete selected window, including gaps without measurements.
+- CSV/JSON export and **Herbouw HA-historie** use the exact same visible range.
+
+Changing the display range never deletes stored raw snapshots or cached historical points.
 
 ## Network and privacy
 
