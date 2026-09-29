@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.12
+
+- Adds a sliding timeline window with **Vorige**, **Vandaag** and **Volgende** controls.
+- Keeps the existing 1/7/14/30/60/90-day window sizes and shifts by the visible window length.
+- Changes the default visible window to 14 days for a less crowded chart.
+- Adds custom **Van** / **Tot** date selectors with an explicit **Toon** action.
+- Custom ranges can span up to 366 days and cannot end in the future.
+- Makes chart/export/rebuild requests use the exact visible date range instead of always using a trailing number of days.
+- Makes the graph x-axis represent the full selected window, including periods without measurements.
+- Makes **Herbouw HA-historie** rebuild exactly the visible range, including custom date ranges.
+- CSV and JSON exports now follow the same visible range.
+- Adds automated validation for explicit date ranges and timeline navigation controls.
+
 ## 0.1.11
 
 - Makes **Herbouw HA-historie** use the currently selected display period (1/7/14/30/60/90 days) instead of the fixed startup lookback.
