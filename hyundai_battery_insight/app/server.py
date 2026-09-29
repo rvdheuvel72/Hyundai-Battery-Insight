@@ -24,12 +24,12 @@ OPTIONS_PATH = DATA_DIR / 'options.json'
 APP_DIR = Path('/app')
 HA_BASE = 'http://supervisor/core/api'
 RAW_SECRET_PATH = DATA_DIR / 'raw_payload_secret.bin'
-RAW_FORMAT = 'hbi-fernet-v1'
+RAW_FORMAT = 'hbi-fernet-v2'
+LEGACY_RAW_FORMAT = 'hbi-fernet-v1'
+RAW_KDF_CONTEXT = b'Hyundai Battery Insight recoverable raw payload v2\0'
 INGRESS_PROXY_IP = '172.30.32.2'
 VIN_KEY_NAMES = {'vin', 'vehiclevin', 'vinnumber', 'vehicleidentificationnumber'}
 VIN_RE = re.compile(r'^[A-HJ-NPR-Z0-9]{17}$', re.IGNORECASE)
-RAW_SECRET_LOCK = threading.Lock()
-_RAW_SECRET = None
 
 
 def load_supervisor_token():
@@ -238,39 +238,30 @@ def _vin_fingerprint(vin):
     return hashlib.sha256(vin.upper().encode('utf-8')).hexdigest()[:16]
 
 
-def ensure_raw_secret():
-    """Load or create the installation-local secret used together with the VIN."""
-    global _RAW_SECRET
-    if _RAW_SECRET is not None:
-        return _RAW_SECRET
-    with RAW_SECRET_LOCK:
-        if _RAW_SECRET is not None:
-            return _RAW_SECRET
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        try:
-            secret = RAW_SECRET_PATH.read_bytes()
-            if len(secret) >= 32:
-                _RAW_SECRET = secret[:32]
-                return _RAW_SECRET
-        except OSError:
-            pass
-
-        secret = os.urandom(32)
-        tmp = RAW_SECRET_PATH.with_name(RAW_SECRET_PATH.name + '.tmp')
-        with tmp.open('wb') as fh:
-            fh.write(secret)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, RAW_SECRET_PATH)
-        _RAW_SECRET = secret
-        return _RAW_SECRET
-
-
 def _raw_fernet(vin):
-    # The VIN participates in key derivation, but is not treated as a secret.
-    # A per-installation random secret provides the actual entropy.
-    secret = ensure_raw_secret()
+    """Recoverable authenticated protection derived deterministically from the VIN.
+
+    This is deliberately not presented as high-security encryption: the VIN is
+    not secret and the derivation context is part of this open-source project.
+    The goal is to avoid plaintext vehicle identifiers in SQLite, preserve
+    recoverability across reinstalls, and detect modified ciphertext.
+    """
+    digest = hashlib.sha256(
+        RAW_KDF_CONTEXT + vin.upper().encode('utf-8')
+    ).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def _legacy_v1_fernet(vin):
+    """Return the temporary v1 Fernet key if its installation secret survives."""
+    try:
+        secret = RAW_SECRET_PATH.read_bytes()
+    except OSError:
+        return None
+    if len(secret) < 32:
+        return None
     digest = hmac.new(
-        secret,
+        secret[:32],
         b'Hyundai Battery Insight raw payload v1\0' + vin.upper().encode('utf-8'),
         hashlib.sha256,
     ).digest()
@@ -278,7 +269,7 @@ def _raw_fernet(vin):
 
 
 def protect_raw_payload(payload, vin=None):
-    """Authenticated-encrypt the complete raw vehicle payload for local storage."""
+    """Protect the complete raw vehicle payload for recoverable local storage."""
     vin = (vin or find_vin(payload) or '').strip().upper()
     if not VIN_RE.fullmatch(vin):
         return None
@@ -294,7 +285,7 @@ def protect_raw_payload(payload, vin=None):
 
 
 def decrypt_raw_payload(value, vin):
-    """Decrypt and authenticate an HBI protected raw payload."""
+    """Decrypt and authenticate a recoverable v2 raw payload."""
     envelope = json.loads(value)
     if envelope.get('format') != RAW_FORMAT:
         raise ValueError('Unsupported raw payload format')
@@ -304,73 +295,101 @@ def decrypt_raw_payload(value, vin):
     return json.loads(plaintext.decode('utf-8'))
 
 
-def migrate_plaintext_raw_payloads(vin_hint=None):
-    """Encrypt legacy plaintext raw_json rows in-place when a VIN is available."""
-    migrated = 0
+def decrypt_legacy_v1_payload(value, vin):
+    """Decrypt the temporary v1 format when its old local secret still exists."""
+    envelope = json.loads(value)
+    if envelope.get('format') != LEGACY_RAW_FORMAT:
+        raise ValueError('Not a legacy v1 payload')
+    if envelope.get('vin_fingerprint') != _vin_fingerprint(vin):
+        raise ValueError('VIN fingerprint does not match this payload')
+    fernet = _legacy_v1_fernet(vin)
+    if fernet is None:
+        raise ValueError('Legacy v1 installation secret is unavailable')
+    plaintext = fernet.decrypt(envelope['ciphertext'].encode('ascii'))
+    return json.loads(plaintext.decode('utf-8'))
+
+
+def migrate_raw_payloads(vin_hint=None):
+    """Migrate plaintext and recoverable v1 rows to the reinstall-safe v2 format."""
+    plaintext_migrated = 0
+    v1_migrated = 0
+    v2_verified = 0
+    invalid = 0
     skipped = 0
-    with db() as c:
-        rows = c.execute(
+
+    with db() as conn:
+        rows = conn.execute(
             'SELECT source_ts, raw_json FROM snapshots WHERE raw_json IS NOT NULL'
         ).fetchall()
+
         for row in rows:
             value = row['raw_json']
             try:
                 parsed = json.loads(value)
             except Exception:
-                skipped += 1
+                invalid += 1
                 continue
-            if isinstance(parsed, dict) and parsed.get('format') == RAW_FORMAT:
+
+            # Legacy plaintext vehicle_data object.
+            if isinstance(parsed, dict) and 'format' not in parsed:
+                vin = find_vin(parsed) or vin_hint
+                protected = protect_raw_payload(parsed, vin)
+                if protected is None:
+                    skipped += 1
+                    continue
+                conn.execute(
+                    'UPDATE snapshots SET raw_json=? WHERE source_ts=?',
+                    (protected, row['source_ts']),
+                )
+                plaintext_migrated += 1
                 continue
+
             if not isinstance(parsed, dict):
-                skipped += 1
+                invalid += 1
                 continue
-            vin = find_vin(parsed) or vin_hint
-            protected = protect_raw_payload(parsed, vin)
-            if protected is None:
-                skipped += 1
+
+            fmt = parsed.get('format')
+            if fmt == RAW_FORMAT:
+                if not vin_hint:
+                    skipped += 1
+                    continue
+                try:
+                    decrypt_raw_payload(value, vin_hint)
+                    v2_verified += 1
+                except (InvalidToken, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                    invalid += 1
                 continue
-            c.execute(
-                'UPDATE snapshots SET raw_json=? WHERE source_ts=?',
-                (protected, row['source_ts']),
-            )
-            migrated += 1
-        c.commit()
-    if migrated or skipped:
-        print(
-            f'[raw protection] migrated {migrated} plaintext payload(s); '
-            f'{skipped} could not be migrated',
-            flush=True,
-        )
 
+            if fmt == LEGACY_RAW_FORMAT:
+                if not vin_hint:
+                    skipped += 1
+                    continue
+                try:
+                    plaintext = decrypt_legacy_v1_payload(value, vin_hint)
+                    protected = protect_raw_payload(plaintext, vin_hint)
+                    if protected is None:
+                        skipped += 1
+                        continue
+                    conn.execute(
+                        'UPDATE snapshots SET raw_json=? WHERE source_ts=?',
+                        (protected, row['source_ts']),
+                    )
+                    v1_migrated += 1
+                except (InvalidToken, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                    # Never delete or overwrite unreadable legacy data.
+                    skipped += 1
+                continue
 
-def verify_protected_raw_payloads(vin):
-    """Authenticate protected payloads belonging to the current VIN."""
-    if not vin:
-        return
-    fingerprint = _vin_fingerprint(vin)
-    verified = 0
-    invalid = 0
-    with db() as c:
-        rows = c.execute(
-            'SELECT raw_json FROM snapshots WHERE raw_json IS NOT NULL'
-        ).fetchall()
-    for row in rows:
-        try:
-            envelope = json.loads(row['raw_json'])
-        except Exception:
-            continue
-        if not isinstance(envelope, dict) or envelope.get('format') != RAW_FORMAT:
-            continue
-        if envelope.get('vin_fingerprint') != fingerprint:
-            continue
-        try:
-            decrypt_raw_payload(row['raw_json'], vin)
-            verified += 1
-        except (InvalidToken, ValueError, KeyError, TypeError, json.JSONDecodeError):
-            invalid += 1
+            skipped += 1
+
+        conn.commit()
+
     print(
-        f'[raw protection] authenticated {verified} encrypted raw payload(s); '
-        f'{invalid} failed authentication',
+        '[raw protection] '
+        f'plaintext→v2={plaintext_migrated}, '
+        f'v1→v2={v1_migrated}, '
+        f'v2 verified={v2_verified}, '
+        f'invalid={invalid}, skipped={skipped}',
         flush=True,
     )
 
@@ -1041,7 +1060,7 @@ class Handler(BaseHTTPRequestHandler):
                     'warning_level': 'Displayed as an API field; its exact Hyundai semantic is not assumed.',
                     'hv_battery_level_resolution': 'Whole-percent HV Battery Level can hide small HV-to-12V energy transfers.',
                     'rate_24h': 'Percentage-points per 24h is endpoint-normalized, not a continuous discharge-current measurement.',
-                    'raw_storage': 'Full raw vehicle payloads are stored locally using authenticated encryption derived from the vehicle VIN plus an installation-local random secret.',
+                    'raw_storage': 'Full raw vehicle payloads are stored locally using recoverable authenticated protection derived from the VIN. It is intended to avoid plaintext identifiers and detect modified ciphertext, not as high-security encryption.',
                 },
             })
             return
@@ -1110,12 +1129,11 @@ def main():
         print(f'[startup poll] {e}', flush=True)
 
     if vin_hint:
-        migrate_plaintext_raw_payloads(vin_hint)
-        verify_protected_raw_payloads(vin_hint)
+        migrate_raw_payloads(vin_hint)
     else:
         print(
             '[raw protection] no VIN found in the current vehicle state; '
-            'legacy plaintext raw payloads cannot be migrated yet',
+            'legacy raw payload migration is deferred until a VIN is available',
             flush=True,
         )
 
