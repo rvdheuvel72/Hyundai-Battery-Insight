@@ -1,5 +1,5 @@
 name: Hyundai Battery Insight
-version: "0.1.9"
+version: "0.1.10"
 slug: hyundai_battery_insight
 description: >-
   Correlates Hyundai/Kia CCS2 12V SoC, HV Battery Level, odometer and fresh vehicle
