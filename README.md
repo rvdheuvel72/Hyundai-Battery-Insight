@@ -108,7 +108,7 @@ Then go to **Settings → Apps → Install app**. The app should appear under **
 
 ## Configuration
 
-Version 0.1.11 can auto-detect the relevant Home Assistant sensors. The app configuration also allows explicit entity IDs:
+Version 0.1.12 can auto-detect the relevant Home Assistant sensors. The app configuration also allows explicit entity IDs:
 
 - `raw_entity`: Hyundai / Kia Connect entity containing the nested `vehicle_data` payload. Default: `sensor.tucson_data_2`.
 - `aux_soc_entity`: 12V battery percentage sensor, or `auto`.
@@ -183,6 +183,15 @@ Support is best-effort only. There is no guarantee of a response, fix, feature a
 Hyundai Battery Insight is released under the [MIT License](LICENSE). You are free to use, fork, modify and redistribute it subject to the license terms.
 
 For the in-app documentation and version history, see [DOCS.md](hyundai_battery_insight/DOCS.md) and [CHANGELOG.md](hyundai_battery_insight/CHANGELOG.md).
+
+## 0.1.12
+
+- Adds **Vorige / Vandaag / Volgende** navigation for the 1/7/14/30/60/90-day timeline windows.
+- Adds custom **Van / Tot** date selection.
+- Makes the graph, CSV/JSON exports and **Herbouw HA-historie** use the exact visible date range.
+- Uses a 14-day default view to keep the chart readable.
+- Keeps the x-axis fixed to the selected time window so gaps remain visible instead of being visually compressed.
+- Adds automated tests for explicit timeline ranges and the new navigation controls.
 
 ## 0.1.11
 
