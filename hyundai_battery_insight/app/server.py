@@ -40,6 +40,7 @@ RAW_BACKUP_COLUMNS = (
 HISTORY_BACKUP_COLUMNS = (
     'source_ts', 'aux_soc', 'ev_soc', 'odometer',
     'aux_source_ts', 'ev_source_ts', 'odometer_source_ts', 'imported_ts',
+    'source_kind',
 )
 INGRESS_PROXY_IP = '172.30.32.2'
 VIN_KEY_NAMES = {'vin', 'vehiclevin', 'vinnumber', 'vehicleidentificationnumber'}
@@ -141,9 +142,24 @@ def init_db():
             aux_source_ts TEXT,
             ev_source_ts TEXT,
             odometer_source_ts TEXT,
-            imported_ts TEXT
+            imported_ts TEXT,
+            source_kind TEXT DEFAULT 'ha_history'
         )
         ''')
+        columns = {
+            row['name'] for row in c.execute(
+                'PRAGMA table_info(ha_history_points)'
+            ).fetchall()
+        }
+        if 'source_kind' not in columns:
+            c.execute(
+                "ALTER TABLE ha_history_points "
+                "ADD COLUMN source_kind TEXT DEFAULT 'ha_history'"
+            )
+        c.execute(
+            "UPDATE ha_history_points SET source_kind='ha_history' "
+            "WHERE source_kind IS NULL OR source_kind=''"
+        )
         c.execute('CREATE INDEX IF NOT EXISTS idx_ha_history_source_ts ON ha_history_points(source_ts)')
         c.commit()
 
@@ -156,6 +172,20 @@ def api_get(path):
         headers={'Authorization': f'Bearer {TOKEN}', 'Content-Type': 'application/json'},
     )
     with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode('utf-8'))
+
+
+def api_post(path, payload):
+    if not TOKEN:
+        raise RuntimeError('SUPERVISOR_TOKEN is missing; homeassistant_api must be enabled')
+    body = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(
+        HA_BASE + path,
+        data=body,
+        method='POST',
+        headers={'Authorization': f'Bearer {TOKEN}', 'Content-Type': 'application/json'},
+    )
+    with urllib.request.urlopen(req, timeout=60) as r:
         return json.loads(r.read().decode('utf-8'))
 
 
@@ -664,7 +694,9 @@ def _history_events(entity, start, now):
                 t = iso_to_dt(ts)
                 if not ts or not t or t < start or t > now:
                     continue
-                events_by_ts[ts] = {'ts': ts, 'dt': t, 'value': value}
+                events_by_ts[ts] = {
+                    'ts': ts, 'dt': t, 'value': value, 'kind': 'ha_history'
+                }
         except Exception as e:
             print(f'[history:{entity}] {cur.isoformat()}..{end.isoformat()}: {e}', flush=True)
         cur = end
@@ -693,9 +725,9 @@ def _cluster_event_times(event_lists, seconds=120):
     return [max(c) for c in clusters]
 
 
-def _value_at(events, t, near_seconds=120):
+def _event_at(events, t, near_seconds=120):
     if not events:
-        return None, None
+        return None
     dts = [e['dt'] for e in events]
     i = bisect.bisect_right(dts, t) - 1
     prev = events[i] if i >= 0 else None
@@ -704,10 +736,15 @@ def _value_at(events, t, near_seconds=120):
     # Prefer a near-future value if it is within the clustering window.
     if nxt and 0 <= (nxt['dt'] - t).total_seconds() <= near_seconds:
         if prev is None or abs((nxt['dt'] - t).total_seconds()) < abs((t - prev['dt']).total_seconds()):
-            return nxt['value'], nxt['ts']
-    if prev:
-        return prev['value'], prev['ts']
-    return None, None
+            return nxt
+    return prev
+
+
+def _value_at(events, t, near_seconds=120):
+    event = _event_at(events, t, near_seconds)
+    if event is None:
+        return None, None
+    return event['value'], event['ts']
 
 
 def _history_event_summary(events):
@@ -720,60 +757,200 @@ def _history_event_summary(events):
     }
 
 
-def import_correlated_history(start, now):
-    """Add all currently available three-stream HA history without deleting cache."""
+def _statistics_value(role, row):
+    if role in ('aux_soc', 'hv_battery'):
+        for key in ('mean', 'state', 'min', 'max'):
+            value = num(row.get(key))
+            if value is not None:
+                return value
+        return None
+    if role == 'odometer':
+        for key in ('state', 'max', 'mean', 'min'):
+            value = num(row.get(key))
+            if value is not None:
+                return value
+        return None
+    return None
+
+
+def _statistics_timestamp(value):
+    if isinstance(value, (int, float)):
+        try:
+            return dt.datetime.fromtimestamp(
+                float(value) / 1000.0, tz=dt.timezone.utc
+            )
+        except Exception:
+            return None
+    return iso_to_dt(value)
+
+
+def _long_term_statistics_events(entities, start, now):
+    """Read hourly long-term statistics for the three configured HA sensors."""
+    statistic_ids = [
+        entity for entity in (
+            entities.get('aux_soc'),
+            entities.get('hv_battery'),
+            entities.get('odometer'),
+        ) if entity
+    ]
+    out = {'aux_soc': [], 'hv_battery': [], 'odometer': []}
+    if not statistic_ids:
+        return out
+
+    response = api_post(
+        '/services/recorder/get_statistics?return_response',
+        {
+            'statistic_ids': statistic_ids,
+            'start_time': start.astimezone(dt.timezone.utc).isoformat(),
+            'end_time': now.astimezone(dt.timezone.utc).isoformat(),
+            'period': 'hour',
+            'types': ['mean', 'min', 'max', 'state'],
+        },
+    )
+    service_response = (
+        response.get('service_response', {})
+        if isinstance(response, dict) else {}
+    )
+    statistics = (
+        service_response.get('statistics', {})
+        if isinstance(service_response, dict) else {}
+    )
+    if not isinstance(statistics, dict):
+        return out
+
+    for role, entity in entities.items():
+        if role not in out or not entity:
+            continue
+        rows = statistics.get(entity, [])
+        if not isinstance(rows, list):
+            continue
+        events = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            value = _statistics_value(role, row)
+            t = _statistics_timestamp(row.get('start'))
+            if value is None or t is None or t < start or t > now:
+                continue
+            events.append({
+                'ts': t.astimezone(dt.timezone.utc).isoformat(),
+                'dt': t.astimezone(dt.timezone.utc),
+                'value': value,
+                'kind': 'ha_statistics',
+            })
+        events.sort(key=lambda e: e['dt'])
+        compressed = []
+        for event in events:
+            if compressed and abs(event['value'] - compressed[-1]['value']) < 1e-9:
+                continue
+            compressed.append(event)
+        out[role] = compressed
+    return out
+
+
+def _merge_detailed_and_statistics(detailed, statistics):
+    """Use detailed Recorder states where available; statistics only for older gap."""
+    if not detailed:
+        return list(statistics)
+    first_detailed = detailed[0]['dt']
+    older_statistics = [
+        event for event in statistics if event['dt'] < first_detailed
+    ]
+    return sorted(older_statistics + detailed, key=lambda event: event['dt'])
+
+
+def import_correlated_history(start, now, include_statistics=False):
+    """Add available HA history without deleting cached correlation evidence."""
     entities = resolve_history_entities()
-    aux_events = _history_events(entities.get('aux_soc'), start, now)
-    hv_events = _history_events(entities.get('hv_battery'), start, now)
-    odo_events = _history_events(entities.get('odometer'), start, now)
+    detailed = {
+        'aux_soc': _history_events(entities.get('aux_soc'), start, now),
+        'hv_battery': _history_events(entities.get('hv_battery'), start, now),
+        'odometer': _history_events(entities.get('odometer'), start, now),
+    }
+
+    statistics = {'aux_soc': [], 'hv_battery': [], 'odometer': []}
+    statistics_error = None
+    if include_statistics:
+        try:
+            statistics = _long_term_statistics_events(entities, start, now)
+        except Exception as e:
+            statistics_error = str(e)
+            print(f'[history:statistics] {e}', flush=True)
+
+    merged = {
+        role: _merge_detailed_and_statistics(
+            detailed.get(role, []), statistics.get(role, [])
+        )
+        for role in ('aux_soc', 'hv_battery', 'odometer')
+    }
 
     result = {
         'resolved_entities': dict(entities),
         'source_events': {
-            'aux_soc': _history_event_summary(aux_events),
-            'hv_battery': _history_event_summary(hv_events),
-            'odometer': _history_event_summary(odo_events),
+            role: _history_event_summary(merged[role])
+            for role in merged
         },
+        'detailed_source_events': {
+            role: _history_event_summary(detailed[role])
+            for role in detailed
+        },
+        'long_term_source_events': {
+            role: _history_event_summary(statistics[role])
+            for role in statistics
+        },
+        'statistics_error': statistics_error,
         'candidate_points': 0,
         'inserted': 0,
         'enriched': 0,
         'unchanged': 0,
     }
 
-    if not aux_events:
+    if not merged['aux_soc']:
         print(
-            '[history] no numeric 12V sensor history found; existing correlation '
-            'cache and raw CCS2 history are preserved',
+            '[history] no numeric 12V history/statistics found; existing '
+            'correlation cache and raw CCS2 history are preserved',
             flush=True,
         )
         return result
 
-    cluster_times = _cluster_event_times([aux_events, hv_events, odo_events])
+    cluster_times = _cluster_event_times([
+        merged['aux_soc'], merged['hv_battery'], merged['odometer']
+    ])
     imported_ts = dt.datetime.now(dt.timezone.utc).isoformat()
     last_signature = None
 
     for t in cluster_times:
-        aux, aux_ts = _value_at(aux_events, t)
-        hv, hv_ts = _value_at(hv_events, t)
-        odo, odo_ts = _value_at(odo_events, t)
-        if aux is None:
+        aux_event = _event_at(merged['aux_soc'], t)
+        hv_event = _event_at(merged['hv_battery'], t)
+        odo_event = _event_at(merged['odometer'], t)
+        if aux_event is None:
             continue
 
+        aux = aux_event['value']
+        hv = hv_event['value'] if hv_event else None
+        odo = odo_event['value'] if odo_event else None
         signature = (aux, hv, odo)
         # Skip a cluster that changes no tracked value after carry-forward.
         if signature == last_signature:
             continue
         last_signature = signature
 
+        used_events = [e for e in (aux_event, hv_event, odo_event) if e]
+        source_kind = (
+            'ha_statistics'
+            if any(e.get('kind') == 'ha_statistics' for e in used_events)
+            else 'ha_history'
+        )
         p = {
             'source_ts': t.astimezone(dt.timezone.utc).isoformat(),
             'aux_soc': aux,
             'ev_soc': hv,
             'odometer': odo,
-            'aux_source_ts': aux_ts,
-            'ev_source_ts': hv_ts,
-            'odometer_source_ts': odo_ts,
+            'aux_source_ts': aux_event['ts'],
+            'ev_source_ts': hv_event['ts'] if hv_event else None,
+            'odometer_source_ts': odo_event['ts'] if odo_event else None,
             'imported_ts': imported_ts,
+            'source_kind': source_kind,
         }
         status = upsert_history_point(p)
         result['candidate_points'] += 1
@@ -783,7 +960,8 @@ def import_correlated_history(start, now):
         '[history] additive three-stream correlation: '
         f"candidates={result['candidate_points']}, "
         f"inserted={result['inserted']}, enriched={result['enriched']}, "
-        f"unchanged={result['unchanged']}",
+        f"unchanged={result['unchanged']}, "
+        f"long_term={'yes' if include_statistics else 'no'}",
         flush=True,
     )
     return result
@@ -811,14 +989,17 @@ def import_raw_history(start, now):
     return count
 
 
-def rebuild_correlated_history():
-    """Re-read only the three HA sensor streams and add missing correlation points."""
+def rebuild_correlated_history(days):
+    """Rebuild the selected display period from detailed history + long-term stats."""
+    days = max(1, min(365, int(days)))
     with HISTORY_IMPORT_LOCK:
         now = dt.datetime.now(dt.timezone.utc)
-        start = now - dt.timedelta(days=OPTIONS['lookback_days'])
-        correlated = import_correlated_history(start, now)
+        start = now - dt.timedelta(days=days)
+        correlated = import_correlated_history(
+            start, now, include_statistics=True
+        )
         return {
-            'lookback_days': OPTIONS['lookback_days'],
+            'days': days,
             'start': start.isoformat(),
             'end': now.isoformat(),
             'correlated': correlated,
@@ -871,6 +1052,10 @@ def classify(prev, cur):
     hours = round((t2 - t1).total_seconds() / 3600, 2) if t1 and t2 else None
     drove = odo_d is not None and odo_d > 0.05
     raw_pair = prev.get('source_kind') == 'raw' and cur.get('source_kind') == 'raw'
+    statistics_pair = (
+        prev.get('source_kind') == 'ha_statistics'
+        or cur.get('source_kind') == 'ha_statistics'
+    )
     charge_seen = charging_active(prev) is True or charging_active(cur) is True
     aux_rate_24h = None
     if aux_d is not None and hours is not None and hours > 0:
@@ -887,7 +1072,9 @@ def classify(prev, cur):
         facts.append(f'{hours:g} h tussen meetpunten')
     if aux_rate_24h is not None and not drove:
         facts.append(f'netto omgerekend {aux_rate_24h:+g} pp/24h')
-    if not raw_pair:
+    if statistics_pair:
+        facts.append('bron: HA long-term statistics betrokken')
+    elif not raw_pair:
         facts.append('bron: HA historical correlation')
 
     if drove:
@@ -938,7 +1125,11 @@ def classify(prev, cur):
         'from': prev.get('source_ts'), 'to': cur.get('source_ts'), 'hours': hours,
         'aux_delta': aux_d, 'hv_battery_level_delta': ev_d, 'odo_delta': odo_d,
         'aux_rate_24h': aux_rate_24h, 'event_type': event_type,
-        'source_quality': 'raw' if raw_pair else 'ha_history',
+        'source_quality': (
+            'raw' if raw_pair else (
+                'ha_statistics' if statistics_pair else 'ha_history'
+            )
+        ),
         'label': label, 'facts': '; '.join(facts), 'inference': inference,
         'unknown': ' '.join(unknown_parts),
     }
@@ -975,7 +1166,7 @@ def _history_rows(days):
             'sleep_mode': None, 'driving_ready': None, 'accessory': None,
             'ignition1': None, 'ignition3': None, 'connector_fastening': None,
             'charging_remain_time': None, 'ev_charging': None, 'raw_json': None,
-            'source_kind': 'ha_history',
+            'source_kind': r.get('source_kind') or 'ha_history',
             'aux_source_ts': r['aux_source_ts'], 'ev_source_ts': r['ev_source_ts'],
             'odometer_source_ts': r['odometer_source_ts'],
         })
@@ -985,25 +1176,46 @@ def _history_rows(days):
 def query_timeline(days):
     raw = _raw_rows(days)
     hist = _history_rows(days)
-    raw_times = sorted(iso_to_dt(r['source_ts']) for r in raw if iso_to_dt(r['source_ts']))
+    raw_times = sorted(
+        iso_to_dt(r['source_ts']) for r in raw if iso_to_dt(r['source_ts'])
+    )
+    detailed_times = sorted(
+        iso_to_dt(r['source_ts']) for r in hist
+        if r.get('source_kind') == 'ha_history' and iso_to_dt(r['source_ts'])
+    )
 
-    def near_raw(t, seconds=300):
-        if not raw_times or not t:
+    def near_any(t, times, seconds):
+        if not times or not t:
             return False
-        i = bisect.bisect_left(raw_times, t)
+        i = bisect.bisect_left(times, t)
         candidates = []
-        if i < len(raw_times):
-            candidates.append(raw_times[i])
+        if i < len(times):
+            candidates.append(times[i])
         if i > 0:
-            candidates.append(raw_times[i - 1])
-        return any(abs((x - t).total_seconds()) <= seconds for x in candidates)
+            candidates.append(times[i - 1])
+        return any(
+            abs((candidate - t).total_seconds()) <= seconds
+            for candidate in candidates
+        )
 
     combined = list(raw)
-    for r in hist:
-        if not near_raw(iso_to_dt(r['source_ts'])):
-            combined.append(r)
-    combined.sort(key=lambda r: r['source_ts'])
-    intervals = [classify(combined[i - 1], combined[i]) for i in range(1, len(combined))]
+    for row in hist:
+        t = iso_to_dt(row['source_ts'])
+        if near_any(t, raw_times, 300):
+            continue
+        # Detailed Recorder states are better evidence than hourly statistics.
+        if (
+            row.get('source_kind') == 'ha_statistics'
+            and near_any(t, detailed_times, 3600)
+        ):
+            continue
+        combined.append(row)
+
+    combined.sort(key=lambda row: row['source_ts'])
+    intervals = [
+        classify(combined[i - 1], combined[i])
+        for i in range(1, len(combined))
+    ]
     return combined, intervals, raw
 
 
@@ -1339,6 +1551,7 @@ class Handler(BaseHTTPRequestHandler):
                 'coverage': {
                     'raw_points': sum(1 for r in rows if r.get('source_kind') == 'raw'),
                     'ha_history_points': sum(1 for r in rows if r.get('source_kind') == 'ha_history'),
+                    'ha_statistics_points': sum(1 for r in rows if r.get('source_kind') == 'ha_statistics'),
                 },
                 'method': {
                     'vehicle_wake': 'No direct Hyundai/Bluelink calls are made.',
@@ -1417,10 +1630,17 @@ class Handler(BaseHTTPRequestHandler):
 
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip('/') or '/'
+        qs = urllib.parse.parse_qs(parsed.query)
 
         if path == '/api/history/rebuild':
             try:
-                result = rebuild_correlated_history()
+                days = max(
+                    1, min(
+                        365,
+                        int(qs.get('days', [OPTIONS['lookback_days']])[0])
+                    )
+                )
+                result = rebuild_correlated_history(days)
                 self.send_json({'ok': True, **result})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)}, 500)
