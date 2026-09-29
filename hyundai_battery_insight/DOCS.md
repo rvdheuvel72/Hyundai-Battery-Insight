@@ -70,6 +70,30 @@ The key is reproducible after reinstall from the same VIN. However, the SQLite d
 
 The app declares `backup: cold`, so Home Assistant stops the app while backing it up to reduce the chance of an inconsistent SQLite backup.
 
+### Manual raw backup and restore
+
+Version 0.1.9 adds two controls to the app UI:
+
+- **Raw backup** downloads a JSON file containing all rows from the raw `snapshots` table, regardless of the currently selected chart period.
+- **Raw herstel** selects one of those backup files and merges it back into the local snapshot store.
+
+Restore behavior is deliberately non-destructive outside matching timestamps:
+
+- rows with a new `source_ts` are inserted;
+- rows with an existing `source_ts` are updated from the backup;
+- existing local rows that are not present in the backup remain untouched;
+- invalid rows are skipped rather than executed or interpreted dynamically.
+
+The backup format only accepts the known snapshot columns. The restore endpoint also limits upload size and checks the backup vehicle fingerprint against the current VIN when both are available.
+
+The complete `raw_json` field remains protected in the backup. Other extracted fields such as timestamps, battery percentages and odometer are stored in readable JSON because they are needed to reconstruct the snapshot table.
+
+A manual raw backup is **not** a replacement for a complete Home Assistant backup. It is intended as an additional portable copy of the app's raw snapshot evidence.
+
+### Display period
+
+The UI period selector offers **1, 7, 14, 30, 60 and 90 days**. This only changes what is displayed/exported through the normal timeline CSV/JSON views; it does not delete older stored raw snapshots.
+
 ## Network and privacy
 
 - The app does not directly authenticate to Hyundai/Kia.
