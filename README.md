@@ -2,6 +2,24 @@
 
 Local Home Assistant app that correlates Hyundai / Kia vehicle battery information already present in Home Assistant. It never calls Hyundai/Bluelink directly and does not request a vehicle refresh.
 
+
+## Why I created this
+
+I created Hyundai Battery Insight after repeatedly seeing the 12V battery in my Hyundai lose charge during periods when the car was used less frequently. The individual values exposed by Hyundai / Kia Connect were useful, but looking at a single current value did not answer the questions I actually had: **when did the 12V level start dropping, was the car driven in between, did the HV battery level change, and did the 12V battery recover without a recorded trip?**
+
+Home Assistant already had much of the data needed to investigate this, but it was spread across the raw vehicle payload, separate sensor histories and different timestamps. This app brings those sources together into one timeline.
+
+A few design goals followed from that:
+
+- **Do not wake the car just to collect data.** The app works with information that is already present in Home Assistant.
+- **Use the vehicle timestamp where possible.** Raw CCS2 data is tied to the timestamp reported by the vehicle instead of assuming the Home Assistant update time is the measurement time.
+- **Correlate 12V, HV Battery Level and odometer data.** Odometer movement provides useful context for distinguishing periods with and without driving.
+- **Keep evidence quality visible.** A raw vehicle snapshot is not treated as equivalent to values reconstructed from separate Home Assistant histories.
+- **Do not fill gaps with invented measurements.** If the car was asleep and no measurement exists, the interval remains unknown.
+- **Separate facts from interpretation.** The dashboard deliberately distinguishes **VERIFIED FACT**, **INFERENCE** and **UNKNOWN** rather than presenting every pattern as a proven cause.
+
+The project started as a practical diagnostic tool for understanding 12V battery behaviour over days and weeks, especially during longer standstill periods. I published it because the same approach may be useful to other Hyundai and Kia owners who already use the Hyundai / Kia Connect integration in Home Assistant.
+
 ## Requirements
 
 - **Home Assistant OS**. Home Assistant Apps are available on Home Assistant OS.
