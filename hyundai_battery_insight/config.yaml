@@ -1,9 +1,10 @@
 name: Hyundai Battery Insight
-version: "0.1.7"
+version: "0.1.8"
 slug: hyundai_battery_insight
 description: >-
   Correlates Hyundai/Kia CCS2 12V SoC, HV Battery Level, odometer and fresh vehicle
   snapshots without waking the car.
+url: https://github.com/rvdheuvel72/Hyundai-Battery-Insight
 arch:
   - amd64
   - aarch64
@@ -14,6 +15,7 @@ ingress: true
 ingress_port: 8099
 panel_icon: mdi:car-battery
 homeassistant_api: true
+backup: cold
 stage: experimental
 options:
   raw_entity: sensor.tucson_data_2
