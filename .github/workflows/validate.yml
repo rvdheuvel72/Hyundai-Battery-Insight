@@ -141,6 +141,7 @@ jobs:
               assert backup["vehicle_fingerprint"] == module._vin_fingerprint(vin)
               assert backup["snapshots"][0]["raw_json"] == raw
               assert backup["ha_history_points"][0]["aux_soc"] == 58.0
+              assert backup["ha_history_points"][0]["source_kind"] == "ha_history"
 
               with module.db() as conn:
                   conn.execute("DELETE FROM snapshots")
@@ -234,6 +235,146 @@ jobs:
               assert rows[1]["odometer"] == 16640.0
 
           print("additive three-stream rebuild: OK")
+          PY
+
+      - name: Test long-term statistics selected-period rebuild
+        run: |
+          python - <<'PY'
+          import datetime as dt
+          import importlib.util
+          import tempfile
+          from pathlib import Path
+
+          path = Path("hyundai_battery_insight/app/server.py")
+          spec = importlib.util.spec_from_file_location("hbi_statistics_test", path)
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+
+          def event(ts, value):
+              parsed = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+              return {
+                  "ts": parsed.isoformat(),
+                  "dt": parsed,
+                  "value": value,
+                  "kind": "ha_history",
+              }
+
+          with tempfile.TemporaryDirectory() as tmp:
+              module.DATA_DIR = Path(tmp)
+              module.DB_PATH = module.DATA_DIR / "hbi.db"
+              module.init_db()
+
+              entities = {
+                  "aux_soc": "sensor.aux",
+                  "hv_battery": "sensor.hv",
+                  "odometer": "sensor.odo",
+              }
+              module.resolve_history_entities = lambda: entities
+
+              detailed = {
+                  "sensor.aux": [event("2026-09-22T08:00:00+00:00", 61.0)],
+                  "sensor.hv": [event("2026-09-22T08:00:20+00:00", 77.0)],
+                  "sensor.odo": [event("2026-09-22T08:00:40+00:00", 16645.0)],
+              }
+              module._history_events = (
+                  lambda entity, start, now: detailed.get(entity, [])
+              )
+
+              def fake_post(path, payload):
+                  assert path == "/services/recorder/get_statistics?return_response"
+                  assert payload["period"] == "hour"
+                  assert set(payload["statistic_ids"]) == {
+                      "sensor.aux", "sensor.hv", "sensor.odo"
+                  }
+                  return {
+                      "changed_states": [],
+                      "service_response": {
+                          "statistics": {
+                              "sensor.aux": [
+                                  {
+                                      "start": "2026-09-14T08:00:00+00:00",
+                                      "mean": 54.0, "min": 54.0, "max": 54.0,
+                                  },
+                                  {
+                                      "start": "2026-09-15T08:00:00+00:00",
+                                      "mean": 52.0, "min": 52.0, "max": 52.0,
+                                  },
+                              ],
+                              "sensor.hv": [
+                                  {
+                                      "start": "2026-09-14T08:00:00+00:00",
+                                      "mean": 81.0,
+                                  },
+                                  {
+                                      "start": "2026-09-15T08:00:00+00:00",
+                                      "mean": 80.0,
+                                  },
+                              ],
+                              "sensor.odo": [
+                                  {
+                                      "start": "2026-09-14T08:00:00+00:00",
+                                      "state": 16640.0,
+                                  },
+                                  {
+                                      "start": "2026-09-15T08:00:00+00:00",
+                                      "state": 16640.0,
+                                  },
+                              ],
+                          }
+                      },
+                  }
+
+              module.api_post = fake_post
+              start = dt.datetime(2026, 9, 1, tzinfo=dt.timezone.utc)
+              now = dt.datetime(2026, 9, 29, tzinfo=dt.timezone.utc)
+              result = module.import_correlated_history(
+                  start, now, include_statistics=True
+              )
+
+              assert result["statistics_error"] is None
+              assert result["long_term_source_events"]["aux_soc"]["count"] == 2
+              assert result["detailed_source_events"]["aux_soc"]["count"] == 1
+
+              with module.db() as conn:
+                  rows = [
+                      dict(r) for r in conn.execute(
+                          "SELECT source_ts, aux_soc, ev_soc, odometer, source_kind "
+                          "FROM ha_history_points ORDER BY source_ts"
+                      ).fetchall()
+                  ]
+              assert any(
+                  r["source_ts"].startswith("2026-09-14T08:00:00")
+                  and r["source_kind"] == "ha_statistics"
+                  and r["aux_soc"] == 54.0
+                  for r in rows
+              )
+              assert any(
+                  r["source_ts"].startswith("2026-09-15T08:00:00")
+                  and r["source_kind"] == "ha_statistics"
+                  and r["aux_soc"] == 52.0
+                  for r in rows
+              )
+              assert any(
+                  r["source_ts"].startswith("2026-09-22T08:00:")
+                  and r["source_kind"] == "ha_history"
+                  for r in rows
+              )
+
+              captured = {}
+              def fake_import(start, now, include_statistics=False):
+                  captured["start"] = start
+                  captured["now"] = now
+                  captured["include_statistics"] = include_statistics
+                  return {"inserted": 0}
+
+              module.import_correlated_history = fake_import
+              rebuilt = module.rebuild_correlated_history(30)
+              assert rebuilt["days"] == 30
+              assert captured["include_statistics"] is True
+              delta = captured["now"] - captured["start"]
+              assert 29.99 < delta.total_seconds() / 86400 < 30.01
+
+          print("long-term statistics selected-period rebuild: OK")
           PY
 
       - name: Check UI day selector
