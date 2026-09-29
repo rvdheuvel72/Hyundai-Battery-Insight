@@ -108,7 +108,7 @@ Then go to **Settings → Apps → Install app**. The app should appear under **
 
 ## Configuration
 
-Version 0.1.10 can auto-detect the relevant Home Assistant sensors. The app configuration also allows explicit entity IDs:
+Version 0.1.11 can auto-detect the relevant Home Assistant sensors. The app configuration also allows explicit entity IDs:
 
 - `raw_entity`: Hyundai / Kia Connect entity containing the nested `vehicle_data` payload. Default: `sensor.tucson_data_2`.
 - `aux_soc_entity`: 12V battery percentage sensor, or `auto`.
@@ -148,7 +148,8 @@ Hyundai Battery Insight is designed to work locally with data already available 
 - Legacy plaintext `raw_json` rows are detected and converted in place when a VIN is available. The temporary pre-release v1 format is also migrated when its old local secret is still present; unreadable rows are never deleted automatically.
 - The protection key is recoverable after reinstall, but the SQLite database itself still needs to survive the reinstall or be restored from a Home Assistant backup. Version 0.1.8+ uses a cold app backup to help keep SQLite backups consistent.
 - Starting with 0.1.10, the UI provides **Data backup** / **Data herstel**. The portable v2 backup contains both raw snapshots and the cached HA historical-correlation points, so the reconstructed timeline can survive reinstall/restore as well.
-- Version 0.1.10 also adds **Herbouw HA-historie**. It re-reads the available Home Assistant Recorder histories for 12V battery level, HV Battery Level and odometer and additively reconstructs missing correlation points without deleting previously cached points.
+- Version 0.1.10 adds **Herbouw HA-historie**. It additively reconstructs missing correlation points without deleting previously cached points.
+- Starting with 0.1.11, that rebuild follows the currently selected display period. Raw CCS2 snapshots remain preferred; detailed Recorder states are used where retained, and hourly long-term statistics fill the older part of the selected period when detailed history has already been purged. Long-term-statistics points remain explicitly marked as lower-resolution aggregated evidence.
 - Existing 0.1.9 raw-only backup files remain restorable. Complete `raw_json` values remain in their stored representation; extracted timeline fields are readable so the database can be reconstructed.
 - The app contains no project telemetry or analytics and does not send vehicle data to an external service operated by this project.
 - CSV and JSON exports are generated only when requested through the app UI and do not include the full protected raw payload.
@@ -182,6 +183,16 @@ Support is best-effort only. There is no guarantee of a response, fix, feature a
 Hyundai Battery Insight is released under the [MIT License](LICENSE). You are free to use, fork, modify and redistribute it subject to the license terms.
 
 For the in-app documentation and version history, see [DOCS.md](hyundai_battery_insight/DOCS.md) and [CHANGELOG.md](hyundai_battery_insight/CHANGELOG.md).
+
+## 0.1.11
+
+- Makes **Herbouw HA-historie** use the currently selected display period.
+- Keeps raw CCS2 snapshots as the preferred source wherever present.
+- Uses detailed Home Assistant Recorder history where available and hourly long-term statistics for the older part of the selected period.
+- Marks long-term-statistics points separately as aggregated evidence rather than exact vehicle snapshots/state-change timestamps.
+- Suppresses statistics points when a nearby detailed Recorder point or raw snapshot exists.
+- Persists the history source type in the database and portable data backup.
+- Adds automated coverage for selected-period long-term-statistics reconstruction.
 
 ## 0.1.10
 
