@@ -108,7 +108,7 @@ Then go to **Settings → Apps → Install app**. The app should appear under **
 
 ## Configuration
 
-Version 0.1.9 can auto-detect the relevant Home Assistant sensors. The app configuration also allows explicit entity IDs:
+Version 0.1.10 can auto-detect the relevant Home Assistant sensors. The app configuration also allows explicit entity IDs:
 
 - `raw_entity`: Hyundai / Kia Connect entity containing the nested `vehicle_data` payload. Default: `sensor.tucson_data_2`.
 - `aux_soc_entity`: 12V battery percentage sensor, or `auto`.
@@ -147,8 +147,9 @@ Hyundai Battery Insight is designed to work locally with data already available 
 - This protection is intentionally **recoverable rather than high-security**: a reinstall can recreate the same key from the same VIN, so preserved/restored raw records do not become unreadable because an installation-local secret was lost. Someone who knows the VIN and has the source code should not be assumed to be cryptographically excluded from the data.
 - Legacy plaintext `raw_json` rows are detected and converted in place when a VIN is available. The temporary pre-release v1 format is also migrated when its old local secret is still present; unreadable rows are never deleted automatically.
 - The protection key is recoverable after reinstall, but the SQLite database itself still needs to survive the reinstall or be restored from a Home Assistant backup. Version 0.1.8+ uses a cold app backup to help keep SQLite backups consistent.
-- Starting with 0.1.9, the UI also provides a manual **Raw backup** / **Raw herstel** option. This exports all rows from the raw snapshot store to a JSON backup and can merge them back later by vehicle timestamp. Existing timestamps are updated from the backup; snapshots not present in the backup are left untouched.
-- Manual raw backups keep the complete `raw_json` field in its protected form. Timeline fields such as timestamps, battery values and odometer are included in readable form so snapshot rows can be reconstructed.
+- Starting with 0.1.10, the UI provides **Data backup** / **Data herstel**. The portable v2 backup contains both raw snapshots and the cached HA historical-correlation points, so the reconstructed timeline can survive reinstall/restore as well.
+- Version 0.1.10 also adds **Herbouw HA-historie**. It re-reads the available Home Assistant Recorder histories for 12V battery level, HV Battery Level and odometer and additively reconstructs missing correlation points without deleting previously cached points.
+- Existing 0.1.9 raw-only backup files remain restorable. Complete `raw_json` values remain in their stored representation; extracted timeline fields are readable so the database can be reconstructed.
 - The app contains no project telemetry or analytics and does not send vehicle data to an external service operated by this project.
 - CSV and JSON exports are generated only when requested through the app UI and do not include the full protected raw payload.
 
@@ -181,6 +182,16 @@ Support is best-effort only. There is no guarantee of a response, fix, feature a
 Hyundai Battery Insight is released under the [MIT License](LICENSE). You are free to use, fork, modify and redistribute it subject to the license terms.
 
 For the in-app documentation and version history, see [DOCS.md](hyundai_battery_insight/DOCS.md) and [CHANGELOG.md](hyundai_battery_insight/CHANGELOG.md).
+
+## 0.1.10
+
+- Makes HA historical-correlation imports additive: previously cached correlation points are no longer deleted during Recorder rebuilds.
+- Adds **Herbouw HA-historie** to re-read the available 12V, HV Battery Level and odometer histories and reconstruct missing correlation points.
+- Reports the count and first/last source timestamp returned for each of the three Home Assistant history streams.
+- Upgrades the portable backup to include both raw `snapshots` and cached `ha_history_points`.
+- Renames the backup controls to **Data backup** and **Data herstel**.
+- Keeps restore compatibility with 0.1.9 raw-only backup files.
+- Adds automated tests for additive history preservation and full timeline backup/restore.
 
 ## 0.1.9
 
