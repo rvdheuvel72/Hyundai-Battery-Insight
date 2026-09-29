@@ -1424,6 +1424,10 @@ def restore_raw_backup_document(document):
             history_skipped += 1
             continue
         row = {column: source.get(column) for column in HISTORY_BACKUP_COLUMNS}
+        row['source_kind'] = row.get('source_kind') or 'ha_history'
+        if row['source_kind'] not in ('ha_history', 'ha_statistics'):
+            history_skipped += 1
+            continue
         source_ts = row.get('source_ts')
         if not isinstance(source_ts, str) or iso_to_dt(source_ts) is None:
             history_skipped += 1
