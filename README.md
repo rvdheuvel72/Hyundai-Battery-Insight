@@ -184,6 +184,15 @@ Hyundai Battery Insight is released under the [MIT License](LICENSE). You are fr
 
 For the in-app documentation and version history, see [DOCS.md](hyundai_battery_insight/DOCS.md) and [CHANGELOG.md](hyundai_battery_insight/CHANGELOG.md).
 
+## 0.1.15
+
+- Uses the original `vehicle_data.Location` GPS fix (coordinates, independent `Location.Date`, speed and heading) **before** secondary Home Assistant tracker history.
+- The dedicated `device_tracker.tucson_location_2` remains a fallback. GPS and speed are considered only when their underlying timestamps are recent; an October vehicle update with a March location is **stale GPS**, not fresh evidence.
+- Persists `Drivetrain.FuelSystem.FuelLevel` in raw snapshots and ordinary evidence exports.
+- Tracks individual driving legs and groups nearby legs into *possible outings* (for example, two drives separated by a 40-minute shopping stop). Original observations remain unmerged.
+- Adds local GPS evidence storage to full-data backups. **Full backups contain precise coordinates**; ordinary CSV/JSON point and interval exports show timestamps/displacement evidence but not raw coordinates.
+- New test covers an old GPS fix inside a fresh CCS2 payload, a 40-minute stop, fuel level and backup handling.
+
 ## 0.1.14
 
 - Adds **Rittenanalyse** grouping multiple successive Bluelink/HA odometer measurements into one *inferred* journey while keeping each sample and SoC reading intact.

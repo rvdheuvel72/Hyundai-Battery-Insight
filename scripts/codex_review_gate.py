@@ -41,7 +41,10 @@ def verdict(issue_comments, head_sha):
     if not matches:
         return 'wait', 'Codex has not reported a review for this PR head'
     review = matches[-1]
-    if review.get('status') != 'completed':
+    status = review.get('status')
+    if status in ('failed', 'error', 'cancelled', 'canceled', 'timed_out'):
+        return 'fail', f'Codex review terminated with status {status}'
+    if status != 'completed':
         return 'wait', 'Codex review for this head has not completed'
     if review.get('has_unresolved_findings') is not False:
         return 'fail', 'Codex review reports outstanding findings'
@@ -83,6 +86,11 @@ def self_test():
     assert verdict([summary(sha, False)], sha)[0] == 'wait'
     assert verdict([summary(sha, unresolved=True)], sha)[0] == 'fail'
     assert verdict([summary(sha)], sha)[0] == 'pass'
+    for terminal in ('failed', 'error', 'cancelled', 'canceled', 'timed_out'):
+        item = summary(sha)
+        payload = {'code_review': {'commit_sha': sha, 'status': terminal}}
+        item['body'] = '<!-- codex-review-state:v1 ' + json.dumps(payload) + ' -->'
+        assert verdict([item], sha)[0] == 'fail'
     # A previous inline comment can remain visible even after resolution.
     # The review summary (not raw comment presence) supplies that state.
     assert verdict([summary(sha, unresolved=False)], sha)[0] == 'pass'

@@ -46,6 +46,18 @@ The rebuild result reports the available detailed and long-term source ranges fo
 
 These correlated values are useful for trends, but they are not treated as equivalent to one raw vehicle snapshot.
 
+### Raw Location timestamps, optional tracker and fuel (0.1.15)
+
+The vehicle's `vehicle_data.Date` is the vehicle snapshot timestamp and agrees with `sensor.tucson_last_updated_at_2` in the supplied October example. `vehicle_data.Location.Date` is **a different, independent GPS fix timestamp**. An October snapshot can legitimately contain a March location, speed and heading. In that case the GPS and speed are **stale** and **must not** count as contemporary movement evidence.
+
+The application stores `Location.GeoCoord`, `Location.Date`, `Location.Speed`, `Location.Heading` and `Drivetrain.FuelSystem.FuelLevel` separately. Raw CCS2 fixes with timestamps within 10 minutes of their matching vehicle snapshot take priority over HA tracker states. An explicitly stale raw GPS fix is not made current merely because HA's `device_tracker.tucson_location_2` state updated recently. Location Date parsing uses the same UTC interpretation as the current raw vehicle Date parser; proprietary Offset/TimeStamp timezone semantics remain unverified.
+
+GPS coordinates are stored **locally** in the app's SQLite database in explicit columns and in the GPS table. They are present in a downloaded *full app-data backup* and should be handled as sensitive personal data. Ordinary interval/point CSV and JSON expose non-identifying GPS timestamps, displacement and evidence summaries, **not precise latitude/longitude**. The app does not intentionally wake the car or query live Bluelink positions.
+
+Raw fuel level is retained even when no journey classification can be inferred from fuel alone. Driving legs use odometer as primary evidence, with HV changes, 12V recovery and independent GPS displacement as supporting signals.
+
+**Rijtrajecten** are inferred driving legs; **Uitstapjes** are possible linked legs within a 2-hour gap, leaving stops such as shopping (30–45 minutes) separate. If fresh GPS supports a return within 150 metres of the departure position, this is additional evidence. If locations are stale or missing, a return remains *unverified*.
+
 ### Journey grouping and review gating (0.1.14)
 
 **Rittenanalyse** groups adjacent, odometer-increasing intervals when the total distance exceeds 1 km, even if each increment is <=1 km. This is an inference, not a recorded ignition or trip start/stop event. Every underlying sample remains separately available in the graph and interval analysis and the interval exports now include journey ID, total distance and sample position.

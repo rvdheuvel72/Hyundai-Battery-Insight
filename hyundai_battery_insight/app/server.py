@@ -5,6 +5,7 @@ import datetime as dt
 import hashlib
 import hmac
 import io
+import math
 import json
 import os
 import re
@@ -36,7 +37,11 @@ RAW_BACKUP_COLUMNS = (
     'battery_pre_warning', 'power_state_class_c', 'sleep_mode', 'driving_ready',
     'accessory', 'ignition1', 'ignition3', 'connector_fastening',
     'charging_remain_time', 'ev_charging', 'raw_json',
+    'fuel_level', 'geo_source_ts', 'geo_latitude', 'geo_longitude',
+    'geo_speed', 'geo_speed_unit', 'geo_heading',
 )
+GPS_BACKUP_COLUMNS = ('source_ts', 'latitude', 'longitude', 'source_kind',
+                      'speed', 'speed_unit', 'heading')
 HISTORY_BACKUP_COLUMNS = (
     'source_ts', 'aux_soc', 'ev_soc', 'odometer',
     'aux_source_ts', 'ev_source_ts', 'odometer_source_ts', 'imported_ts',
@@ -72,6 +77,7 @@ DEFAULTS = {
     'aux_soc_entity': 'auto',
     'hv_battery_entity': 'auto',
     'odometer_entity': 'auto',
+    'gps_entity': 'device_tracker.tucson_location_2',
     'lookback_days': 120,
     'poll_seconds': 300,
     'import_on_start': True,
@@ -129,9 +135,28 @@ def init_db():
             connector_fastening INTEGER,
             charging_remain_time REAL,
             ev_charging TEXT,
-            raw_json TEXT
+            raw_json TEXT,
+            fuel_level REAL,
+            geo_source_ts TEXT,
+            geo_latitude REAL,
+            geo_longitude REAL,
+            geo_speed REAL,
+            geo_speed_unit INTEGER,
+            geo_heading REAL
         )
         ''')
+        # Existing installations must migrate without erasing original snapshots.
+        snapshot_columns = {
+            r['name'] for r in c.execute('PRAGMA table_info(snapshots)').fetchall()
+        }
+        for key, type_name in (
+            ('fuel_level', 'REAL'), ('geo_source_ts', 'TEXT'),
+            ('geo_latitude', 'REAL'), ('geo_longitude', 'REAL'),
+            ('geo_speed', 'REAL'), ('geo_speed_unit', 'INTEGER'),
+            ('geo_heading', 'REAL')
+        ):
+            if key not in snapshot_columns:
+                c.execute(f'ALTER TABLE snapshots ADD COLUMN {key} {type_name}')
         c.execute('CREATE INDEX IF NOT EXISTS idx_snapshots_source_ts ON snapshots(source_ts)')
         c.execute('''
         CREATE TABLE IF NOT EXISTS ha_history_points (
@@ -161,6 +186,21 @@ def init_db():
             "WHERE source_kind IS NULL OR source_kind=''"
         )
         c.execute('CREATE INDEX IF NOT EXISTS idx_ha_history_source_ts ON ha_history_points(source_ts)')
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS gps_points (
+            source_ts TEXT PRIMARY KEY,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
+            source_kind TEXT NOT NULL,
+            speed REAL,
+            speed_unit INTEGER,
+            heading REAL
+        )
+        ''')
+        gps_columns = {r['name'] for r in c.execute('PRAGMA table_info(gps_points)').fetchall()}
+        for key, type_name in (('speed', 'REAL'), ('speed_unit', 'INTEGER'), ('heading', 'REAL')):
+            if key not in gps_columns:
+                c.execute(f'ALTER TABLE gps_points ADD COLUMN {key} {type_name}')
         c.commit()
 
 
@@ -470,6 +510,16 @@ def extract_snapshot(state_obj):
     vin = find_vin(state_obj) or find_vin(vd)
     protected_raw = protect_raw_payload(vd, vin)
 
+    loc = vd.get('Location') or {}
+    geo = loc.get('GeoCoord') or {}
+    lat, lon = num(geo.get('Latitude')), num(geo.get('Longitude'))
+    if (lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180)
+            or (lat == 0 and lon == 0)):
+        lat = lon = None
+    geo_source_ts = parse_vehicle_ts(loc.get('Date'))
+    if not geo_source_ts:
+        lat = lon = None
+
     return {
         'source_ts': source_ts,
         'received_ts': parse_vehicle_ts(None, state_obj.get('last_updated')),
@@ -478,6 +528,12 @@ def extract_snapshot(state_obj):
         'ev_soh': num(get_path(bm, 'SoH', 'Ratio')),
         'odometer': num(drivetrain.get('Odometer')),
         'ev_range': num(get_path(fuel, 'DTE', 'EV')),
+        'fuel_level': num(fuel.get('FuelLevel')),
+        'geo_source_ts': geo_source_ts,
+        'geo_latitude': lat, 'geo_longitude': lon,
+        'geo_speed': num(get_path(loc, 'Speed', 'Value')),
+        'geo_speed_unit': intval(get_path(loc, 'Speed', 'Unit')),
+        'geo_heading': num(loc.get('Heading')),
         'warning_level': num(get_path(battery, 'Charging', 'WarningLevel')),
         'sensor_reliability': intval(battery.get('SensorReliability')),
         'aux_fail_warning': intval(get_path(battery, 'Auxiliary', 'FailWarning')),
@@ -516,7 +572,19 @@ def upsert_snapshot(s):
             [s[c] for c in cols],
         )
         c.commit()
-        return before is None
+    # The GPS reading has its OWN timestamp. Never stamp old GPS data with
+    # the current vehicle or Home Assistant update time.
+    if s.get('geo_source_ts') and s.get('geo_latitude') is not None and s.get('geo_longitude') is not None:
+        upsert_gps_position({
+            'source_ts': s['geo_source_ts'],
+            'latitude': s['geo_latitude'],
+            'longitude': s['geo_longitude'],
+            'source_kind': 'raw_ccs2',
+            'speed': s.get('geo_speed'),
+            'speed_unit': s.get('geo_speed_unit'),
+            'heading': s.get('geo_heading'),
+        })
+    return before is None
 
 
 def upsert_history_point(p):
@@ -568,7 +636,145 @@ def get_current_state(entity_id):
         return None
 
 
+
+# GPS timestamps are Home Assistant state-update times, not verified satellite
+# fix times. No geolocation service or forced Hyundai refresh is invoked.
+GPS_MAX_SAMPLE_AGE_SECONDS = 10 * 60
+GPS_STOP_RADIUS_KM = 0.15
+OUTING_MAX_STOP_HOURS = 2.0
+
+
+def valid_position(state):
+    """Extract a valid tracker coordinate; reject unknown/unavailable states."""
+    if not isinstance(state, dict):
+        return None
+    if state.get('state') in ('unknown', 'unavailable'):
+        return None
+    attrs = state.get('attributes') or {}
+    lat, lon = num(attrs.get('latitude')), num(attrs.get('longitude'))
+    if (lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180)
+            or (lat == 0 and lon == 0)):
+        return None
+    stamp = parse_vehicle_ts(None, state.get('last_updated') or state.get('last_changed'))
+    if not stamp:
+        return None
+    return {'source_ts': stamp, 'latitude': lat, 'longitude': lon,
+            'source_kind': 'ha_tracker', 'speed': None,
+            'speed_unit': None, 'heading': None}
+
+
+def upsert_gps_position(point):
+    if not point:
+        return False
+    point = {name: point.get(name) for name in GPS_BACKUP_COLUMNS}
+    if point['source_kind'] not in ('raw_ccs2', 'ha_tracker'):
+        return False
+    with db() as conn:
+        exists = conn.execute(
+            'SELECT 1 FROM gps_points WHERE source_ts=?', (point['source_ts'],)
+        ).fetchone()
+        conn.execute(
+            '''INSERT INTO gps_points (source_ts, latitude, longitude, source_kind, speed, speed_unit, heading)
+               VALUES (:source_ts, :latitude, :longitude, :source_kind, :speed, :speed_unit, :heading)
+               ON CONFLICT(source_ts) DO UPDATE SET
+                 latitude=excluded.latitude, longitude=excluded.longitude,
+                 source_kind=excluded.source_kind, speed=excluded.speed,
+                 speed_unit=excluded.speed_unit, heading=excluded.heading
+               WHERE excluded.source_kind='raw_ccs2'
+                  OR gps_points.source_kind != 'raw_ccs2' ''', point
+        )
+        conn.commit()
+    return exists is None
+
+
+def import_gps_history(start, end):
+    """Read existing HA tracker history without commanding/awakening the car."""
+    entity = OPTIONS.get('gps_entity', '').strip()
+    if not entity:
+        return {'inserted': 0, 'valid': 0, 'unavailable': True}
+    count = inserted = 0
+    cursor = start
+    while cursor < end:
+        stop = min(cursor + dt.timedelta(days=14), end)
+        try:
+            for state in history_chunk(entity, cursor, stop):
+                point = valid_position(state)
+                if point and start <= iso_to_dt(point['source_ts']) <= stop:
+                    count += 1
+                    inserted += int(upsert_gps_position(point))
+        except Exception as exc:
+            print(f'[GPS] history import warning: {exc}', flush=True)
+        cursor = stop
+    return {'inserted': inserted, 'valid': count, 'unavailable': False}
+
+
+def gps_points_range(start, end):
+    with db() as conn:
+        return [dict(row) for row in conn.execute(
+            'SELECT * FROM gps_points WHERE source_ts >= ? AND source_ts < ? ORDER BY source_ts',
+            (start.isoformat(), end.isoformat())
+        ).fetchall()]
+
+
+def haversine_km(a_lat, a_lon, b_lat, b_lon):
+    phi1, phi2 = math.radians(a_lat), math.radians(b_lat)
+    dphi, dlambda = phi2 - phi1, math.radians(b_lon - a_lon)
+    value = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
+    return 6371.0 * 2 * math.asin(min(1.0, math.sqrt(max(0.0, value))))
+
+
+def attach_fresh_gps(rows, gps_points):
+    """Prefer the actual raw CCS2 GPS fix timestamp over copied HA state time."""
+    times = [iso_to_dt(g['source_ts']) for g in gps_points]
+    for row in rows:
+        row.pop('_gps', None)
+        timestamp = iso_to_dt(row.get('source_ts'))
+        if not timestamp:
+            continue
+        raw_geo_ts = iso_to_dt(row.get('geo_source_ts'))
+        if raw_geo_ts:
+            # Explicitly stale raw positions must not be "freshened" by HA.
+            if (abs((raw_geo_ts-timestamp).total_seconds()) <= GPS_MAX_SAMPLE_AGE_SECONDS
+                    and row.get('geo_latitude') is not None
+                    and row.get('geo_longitude') is not None):
+                row['_gps'] = {
+                    'source_ts': row['geo_source_ts'],
+                    'latitude': row['geo_latitude'],
+                    'longitude': row['geo_longitude'],
+                    'source_kind': 'raw_ccs2',
+                    'speed': row.get('geo_speed'),
+                    'speed_unit': row.get('geo_speed_unit'),
+                    'heading': row.get('geo_heading'),
+                }
+            continue
+        if not times:
+            continue
+        pos = bisect.bisect_left(times, timestamp)
+        candidates = [i for i in (pos-1, pos) if 0 <= i < len(times)]
+        closest = min(candidates, key=lambda i: (
+            abs((times[i]-timestamp).total_seconds()),
+            gps_points[i].get('source_kind') != 'raw_ccs2',
+        ))
+        age = abs((times[closest]-timestamp).total_seconds())
+        if age <= GPS_MAX_SAMPLE_AGE_SECONDS:
+            row['_gps'] = gps_points[closest]
+
+
+def gps_displacement_km(a, b):
+    pos_a, pos_b = a.get('_gps'), b.get('_gps')
+    if not pos_a or not pos_b or pos_a['source_ts'] == pos_b['source_ts']:
+        return None
+    return round(haversine_km(
+        pos_a['latitude'], pos_a['longitude'],
+        pos_b['latitude'], pos_b['longitude']
+    ), 3)
+
+
 def poll_once():
+    try:
+        poll_gps_from_ha()
+    except Exception as exc:
+        print(f'[GPS] tracker state unavailable: {exc}', flush=True)
     raw = get_current_state(OPTIONS.get('raw_entity', ''))
     if raw:
         snap = extract_snapshot(raw)
@@ -576,6 +782,14 @@ def poll_once():
             upsert_snapshot(snap)
             return find_vin(raw)
     return None
+
+
+def poll_gps_from_ha():
+    """Collect an existing tracker state without forcing a vehicle update."""
+    entity = OPTIONS.get('gps_entity', '').strip()
+    if not entity:
+        return False
+    return upsert_gps_position(valid_position(get_current_state(entity)))
 
 
 def history_chunk(entity, start, end):
@@ -1011,10 +1225,12 @@ def rebuild_correlated_history_range(start, end):
         correlated = import_correlated_history(
             start, end, include_statistics=True
         )
+        gps = import_gps_history(start, end)
         return {
             'start': start.isoformat(),
             'end': end.isoformat(),
             'correlated': correlated,
+            'gps': gps,
         }
 
 
@@ -1035,12 +1251,14 @@ def import_history():
         start = now - dt.timedelta(days=OPTIONS['lookback_days'])
         raw_count = import_raw_history(start, now)
         correlated = import_correlated_history(start, now)
+        gps = import_gps_history(start, now)
         return {
             'lookback_days': OPTIONS['lookback_days'],
             'start': start.isoformat(),
             'end': now.isoformat(),
             'raw_processed': raw_count,
             'correlated': correlated,
+            'gps': gps,
         }
 
 
@@ -1257,8 +1475,14 @@ def group_journeys(rows, intervals):
             finish()
             # A large odometer jump across a sleep gap may indicate a trip,
             # but it cannot be joined to later short-interval driving samples.
-            if dist > JOURNEY_MIN_KM:
+            # Small movement spread over a long gap does not prove a drive.
+            if dist > 2.0:
                 groups.append([i])
+            else:
+                interval['inference'] += (
+                    ' Odometertoename over een groot meetgat; geen ritduur '
+                    'of tijdstip van de beweging aangetoond.'
+                )
             continue
         active.append(i)
     finish()
@@ -1278,8 +1502,30 @@ def group_journeys(rows, intervals):
             evidence = 'ha_statistics'
         else:
             evidence = 'ha_history'
+        sparse = any((intervals[i].get('hours') or 0) > JOURNEY_MAX_SAMPLE_GAP_HOURS
+                     for i in group)
+        aux_delta = (last['aux_soc'] - first['aux_soc']
+                     if last.get('aux_soc') is not None and first.get('aux_soc') is not None
+                     else None)
+        hv_delta = (last['ev_soc'] - first['ev_soc']
+                    if last.get('ev_soc') is not None and first.get('ev_soc') is not None
+                    else None)
+        gps_dist = gps_displacement_km(first, last)
+        supports = []
+        if hv_delta is not None and hv_delta <= -0.5:
+            supports.append('HV verbruik')
+        if aux_delta is not None and aux_delta >= 1:
+            supports.append('12V herstel')
+        if gps_dist is not None and gps_dist > GPS_STOP_RADIUS_KM:
+            supports.append('GPS verplaatsing')
+        confidence = ('laag' if sparse else (
+            'hoog' if len(supports) >= 2 else 'middel'
+        ))
         journey = {
             'journey_id': jid,
+            'gps_displacement_km': gps_dist,
+            'supporting_signals': ', '.join(supports) if supports else 'alleen odometer',
+            'confidence': confidence,
             'from': first['source_ts'], 'to': last['source_ts'],
             'distance_km': distance,
             'interval_count': len(group),
@@ -1307,6 +1553,14 @@ def group_journeys(rows, intervals):
             interval['journey_interval_index'] = number
             interval['journey_interval_count'] = len(group)
             interval['journey_distance_km'] = distance
+            interval['journey_confidence'] = confidence
+            interval['journey_supporting_signals'] = journey['supporting_signals']
+            interval['journey_gps_displacement_km'] = gps_dist
+            if sparse:
+                interval['unknown'] += (
+                    ' De beweging tussen deze endpoints kan veel korter hebben '
+                    'geduurd dan het meetgat: begin/einde van de rit onbekend.'
+                )
             interval['inference'] += (
                 ' Dit meetinterval hoort bij een vermoedelijke rit van '
                 f'{distance:g} km, opgebouwd uit {len(group)} '
@@ -1339,6 +1593,10 @@ def journeys_from_intervals(intervals):
             'distance_km': peers[0]['journey_distance_km'],
             'interval_count': len(peers),
             'measurement_count': len(peers) + 1,
+            'gps_displacement_km': peers[0].get('journey_gps_displacement_km'),
+            'supporting_signals': peers[0].get('journey_supporting_signals'),
+            'confidence': peers[0].get('journey_confidence', 'middel'),
+            'outing_id': peers[0].get('outing_id'),
             'source_quality': (
                 'ha_statistics' if any(x['source_quality'] == 'ha_statistics' for x in peers)
                 else 'ha_history' if any(x['source_quality'] != 'raw' for x in peers)
@@ -1347,6 +1605,90 @@ def journeys_from_intervals(intervals):
             'inference': 'Vermoedelijke rit op basis van cumulatieve kilometerstand; begin/eindtijden zijn meetgrenzen, geen bewezen contactmomenten.',
         })
     return summaries
+
+
+
+def group_outings(journeys, intervals, rows):
+    """Group nearby driving legs into a *possible* outing, never one long drive."""
+    groups = []
+    active = []
+    for journey in journeys:
+        if active:
+            previous = active[-1]
+            previous_end, this_start = iso_to_dt(previous['to']), iso_to_dt(journey['from'])
+            gap_h = ((this_start - previous_end).total_seconds() / 3600.0
+                     if previous_end and this_start else None)
+            if gap_h is None or not (0 <= gap_h <= OUTING_MAX_STOP_HOURS):
+                if len(active) > 1:
+                    groups.append(active)
+                active = []
+        active.append(journey)
+    if len(active) > 1:
+        groups.append(active)
+
+    outings = []
+    for group in groups:
+        first, last = group[0], group[-1]
+        oid = 'outing-' + first['from']
+        start = next((row for row in rows if row.get('source_ts') == first['from']), None)
+        end = next((row for row in rows if row.get('source_ts') == last['to']), None)
+        return_distance = gps_displacement_km(start, end) if start and end else None
+        is_return = return_distance is not None and return_distance <= GPS_STOP_RADIUS_KM
+        outing = {
+            'outing_id': oid,
+            'from': first['from'], 'to': last['to'],
+            'leg_count': len(group),
+            'total_distance_km': round(sum(j['distance_km'] for j in group), 3),
+            'gps_return_to_start': is_return if return_distance is not None else None,
+            'return_distance_km': return_distance,
+            'confidence': ('GPS ondersteunt terugkeer' if is_return
+                           else 'mogelijke uitstap; terugkeer onbewezen'),
+            'inference': (
+                'Aparte rijtrajecten met tussenliggende stilstand zijn gekoppeld '
+                'op basis van tijd. De auto heeft niet continu gereden; '
+                'een gelijk begin- en eindpunt kan alleen met tijdige GPS-metingen '
+                'worden ondersteund.'
+            ),
+        }
+        outings.append(outing)
+        for journey in group:
+            journey['outing_id'] = oid
+        for it in intervals:
+            if it.get('journey_id') in {j['journey_id'] for j in group}:
+                it['outing_id'] = oid
+                it['outing_gps_return_to_start'] = outing['gps_return_to_start']
+                it['outing_return_distance_km'] = return_distance
+    return outings
+
+
+def outings_from_intervals(intervals):
+    """Build safe, coordinate-free outing summaries for API and exports."""
+    journeys = journeys_from_intervals(intervals)
+    grouped = {}
+    for journey in journeys:
+        oid = journey.get('outing_id')
+        if oid:
+            grouped.setdefault(oid, []).append(journey)
+    result = []
+    for key, group in grouped.items():
+        evidence = next(
+            (x for x in intervals if x.get('outing_id') == key), {}
+        )
+        gps_return = evidence.get('outing_gps_return_to_start')
+        result.append({
+            'outing_id': key, 'from': group[0]['from'], 'to': group[-1]['to'],
+            'leg_count': len(group),
+            'total_distance_km': round(sum(x['distance_km'] for x in group), 3),
+            'journey_ids': [x['journey_id'] for x in group],
+            'gps_return_to_start': gps_return,
+            'return_distance_km': evidence.get('outing_return_distance_km'),
+            'confidence': (
+                'GPS ondersteunt terugkeer' if gps_return is True
+                else 'GPS ondersteunt geen terugkeer' if gps_return is False
+                else 'Mogelijke uitstap; terugkeer onbewezen'
+            ),
+        })
+    return result
 
 
 def query_timeline_range(start, end):
@@ -1389,11 +1731,17 @@ def query_timeline_range(start, end):
         combined.append(row)
 
     combined.sort(key=lambda row: row['source_ts'])
+    positions = gps_points_range(
+        start - dt.timedelta(seconds=GPS_MAX_SAMPLE_AGE_SECONDS),
+        end + dt.timedelta(seconds=GPS_MAX_SAMPLE_AGE_SECONDS)
+    )
+    attach_fresh_gps(combined, positions)
     intervals = [
         classify(combined[i - 1], combined[i])
         for i in range(1, len(combined))
     ]
-    group_journeys(combined, intervals)
+    legs = group_journeys(combined, intervals)
+    group_outings(legs, intervals, combined)
     return combined, intervals, raw
 
 
@@ -1519,6 +1867,11 @@ def raw_backup_document():
                 'SELECT * FROM ha_history_points ORDER BY source_ts'
             ).fetchall()
         ]
+        gps_rows = [
+            dict(row) for row in conn.execute(
+                'SELECT * FROM gps_points ORDER BY source_ts'
+            ).fetchall()
+        ]
 
     vehicle_fingerprint = None
     for row in reversed(rows):
@@ -1539,6 +1892,7 @@ def raw_backup_document():
         'vehicle_fingerprint': vehicle_fingerprint,
         'snapshot_count': len(rows),
         'history_point_count': len(history_rows),
+        'gps_point_count': len(gps_rows),
         'snapshots': [
             {column: row.get(column) for column in RAW_BACKUP_COLUMNS}
             for row in rows
@@ -1546,6 +1900,12 @@ def raw_backup_document():
         'ha_history_points': [
             {column: row.get(column) for column in HISTORY_BACKUP_COLUMNS}
             for row in history_rows
+        ],
+        # GPS coordinates are sensitive: included only in the explicitly
+        # requested full DATA BACKUP, never normal sample/interval exports.
+        'gps_points': [
+            {column: row.get(column) for column in GPS_BACKUP_COLUMNS}
+            for row in gps_rows
         ],
     }
 
@@ -1574,6 +1934,12 @@ def restore_raw_backup_document(document):
     )
     if not isinstance(history_points, list):
         raise ValueError('HBI-backup bevat geen geldige HA-historie-lijst.')
+    gps_points = (
+        document.get('gps_points', [])
+        if backup_format == DATA_BACKUP_FORMAT else []
+    )
+    if not isinstance(gps_points, list):
+        raise ValueError('HBI-backup bevat geen geldige GPS-puntenlijst.')
 
     current_vin = _current_vehicle_vin()
     backup_fingerprint = document.get('vehicle_fingerprint')
@@ -1585,14 +1951,6 @@ def restore_raw_backup_document(document):
     updated = 0
     skipped = 0
     cols = list(RAW_BACKUP_COLUMNS)
-    placeholders = ','.join('?' for _ in cols)
-    updates = ','.join(
-        (
-            'raw_json=COALESCE(excluded.raw_json,snapshots.raw_json)'
-            if col == 'raw_json' else f'{col}=excluded.{col}'
-        )
-        for col in cols if col != 'source_ts'
-    )
 
     with db() as conn:
         for source in snapshots:
@@ -1600,11 +1958,25 @@ def restore_raw_backup_document(document):
                 skipped += 1
                 continue
 
-            row = {column: source.get(column) for column in cols}
+            # Old backup formats do not contain the 0.1.15 fuel/GPS columns.
+            # Include only keys actually present so missing fields cannot
+            # overwrite already stored values with NULL on conflict.
+            present_cols = [column for column in cols if column in source]
+            row = {column: source[column] for column in present_cols}
             source_ts = row.get('source_ts')
             if not isinstance(source_ts, str) or iso_to_dt(source_ts) is None:
                 skipped += 1
                 continue
+
+            # Legacy backups may contain placeholder coordinates in snapshot rows.
+            # Never promote a zero pair into GPS evidence after restore.
+            lat = num(row.get('geo_latitude'))
+            lon = num(row.get('geo_longitude'))
+            if lat == 0 and lon == 0:
+                for key in ('geo_source_ts', 'geo_latitude', 'geo_longitude',
+                            'geo_speed', 'geo_heading'):
+                    row.pop(key, None)
+                present_cols = [key for key in present_cols if key in row]
 
             raw_value = row.get('raw_json')
             if raw_value is not None and not isinstance(raw_value, str):
@@ -1615,10 +1987,20 @@ def restore_raw_backup_document(document):
                 'SELECT 1 FROM snapshots WHERE source_ts=?', (source_ts,)
             ).fetchone() is not None
 
+            placeholders = ','.join('?' for _ in present_cols)
+            updates = ','.join(
+                ('raw_json=COALESCE(excluded.raw_json,snapshots.raw_json)'
+                 if column == 'raw_json' else f'{column}=excluded.{column}')
+                for column in present_cols if column != 'source_ts'
+            )
+            conflict_action = (
+                f'ON CONFLICT(source_ts) DO UPDATE SET {updates}'
+                if updates else 'ON CONFLICT(source_ts) DO NOTHING'
+            )
             conn.execute(
-                f"INSERT INTO snapshots ({','.join(cols)}) VALUES ({placeholders}) "
-                f"ON CONFLICT(source_ts) DO UPDATE SET {updates}",
-                [row[column] for column in cols],
+                f"INSERT INTO snapshots ({','.join(present_cols)}) VALUES ({placeholders}) "
+                + conflict_action,
+                [row[column] for column in present_cols],
             )
             if existed:
                 updated += 1
@@ -1663,6 +2045,23 @@ def restore_raw_backup_document(document):
         else:
             history_unchanged += 1
 
+    gps_inserted = gps_skipped = 0
+    for source in gps_points:
+        if not isinstance(source, dict) or source.get('source_kind') not in ('ha_tracker', 'raw_ccs2'):
+            gps_skipped += 1
+            continue
+        point = {key: source.get(key) for key in GPS_BACKUP_COLUMNS}
+        when = point.get('source_ts')
+        lat, lon = num(point.get('latitude')), num(point.get('longitude'))
+        if (not isinstance(when, str) or not iso_to_dt(when)
+                or lat is None or lon is None
+                or not (-90 <= lat <= 90 and -180 <= lon <= 180)
+                or (lat == 0 and lon == 0)):
+            gps_skipped += 1
+            continue
+        point['latitude'], point['longitude'] = lat, lon
+        gps_inserted += int(upsert_gps_position(point))
+
     # This also upgrades any legacy plaintext rows from older backups.
     if current_vin:
         migrate_raw_payloads(current_vin)
@@ -1679,6 +2078,9 @@ def restore_raw_backup_document(document):
         'history_unchanged': history_unchanged,
         'history_skipped': history_skipped,
         'history_total_in_file': len(history_points),
+        'gps_total_in_file': len(gps_points),
+        'gps_inserted': gps_inserted,
+        'gps_skipped': gps_skipped,
     }
 
 
@@ -1689,6 +2091,13 @@ def public_snapshot(r):
         'aux_soc': r.get('aux_soc'),
         'hv_battery_level': r.get('ev_soc'),
         'odometer': r.get('odometer'),
+        'fuel_level': r.get('fuel_level'),
+        'geo_source_ts': r.get('geo_source_ts'),
+        'gps_fix_age_hours': (
+            round((iso_to_dt(r['source_ts']) - iso_to_dt(r['geo_source_ts'])).total_seconds()/3600, 2)
+            if r.get('geo_source_ts') and iso_to_dt(r.get('source_ts'))
+            and iso_to_dt(r.get('geo_source_ts')) else None
+        ),
         'warning_level': r.get('warning_level'),
         'sleep_mode': r.get('sleep_mode'),
         'sensor_reliability': r.get('sensor_reliability'),
@@ -1708,9 +2117,12 @@ INTERVAL_EXPORT_COLUMNS = (
     'from', 'to', 'hours', 'source_quality', 'event_type', 'label',
     'aux_soc_start', 'aux_soc_end', 'aux_delta_pp',
     'hv_battery_level_start', 'hv_battery_level_end', 'hv_battery_level_delta_pp',
+    'fuel_level_start', 'fuel_level_end', 'fuel_level_delta',
     'odometer_start', 'odometer_end', 'odometer_delta_km',
     'netto_pp_per_24h', 'real_peak_12v_soc', 'journey_id',
     'journey_interval_index', 'journey_interval_count', 'journey_distance_km',
+    'journey_confidence', 'journey_supporting_signals', 'journey_gps_displacement_km',
+    'outing_id', 'outing_gps_return_to_start', 'outing_return_distance_km',
     'facts', 'inference', 'unknown',
 )
 INTERVAL_EXPORT_NOTE = (
@@ -1740,6 +2152,13 @@ def interval_export_rows(rows, intervals):
             'hv_battery_level_start': start.get('ev_soc'),
             'hv_battery_level_end': end.get('ev_soc'),
             'hv_battery_level_delta_pp': interval.get('hv_battery_level_delta'),
+            'fuel_level_start': start.get('fuel_level'),
+            'fuel_level_end': end.get('fuel_level'),
+            'fuel_level_delta': (
+                round(end['fuel_level']-start['fuel_level'], 3)
+                if start.get('fuel_level') is not None and end.get('fuel_level') is not None
+                else None
+            ),
             'odometer_start': start.get('odometer'),
             'odometer_end': end.get('odometer'),
             'odometer_delta_km': interval.get('odo_delta'),
@@ -1749,6 +2168,12 @@ def interval_export_rows(rows, intervals):
             'journey_interval_index': interval.get('journey_interval_index'),
             'journey_interval_count': interval.get('journey_interval_count'),
             'journey_distance_km': interval.get('journey_distance_km'),
+            'journey_confidence': interval.get('journey_confidence'),
+            'journey_supporting_signals': interval.get('journey_supporting_signals'),
+            'journey_gps_displacement_km': interval.get('journey_gps_displacement_km'),
+            'outing_id': interval.get('outing_id'),
+            'outing_gps_return_to_start': interval.get('outing_gps_return_to_start'),
+            'outing_return_distance_km': interval.get('outing_return_distance_km'),
             'facts': interval.get('facts'),
             'inference': interval.get('inference'),
             'unknown': interval.get('unknown'),
@@ -1763,6 +2188,7 @@ def interval_export_document(rows, intervals, range_start, range_end):
         'interpretation_note': INTERVAL_EXPORT_NOTE,
         'interval_count': len(intervals),
         'journeys': journeys_from_intervals(intervals),
+        'outings': outings_from_intervals(intervals),
         'intervals': interval_export_rows(rows, intervals),
     }
 
@@ -1841,6 +2267,12 @@ class Handler(BaseHTTPRequestHandler):
                 'snapshots': [public_snapshot(r) for r in rows],
                 'intervals': intervals,
                 'journeys': journeys_from_intervals(intervals),
+                'outings': outings_from_intervals(intervals),
+                'gps': {
+                    'configured_entity': OPTIONS.get('gps_entity'),
+                    'matched_measurements': sum(1 for r in rows if r.get('_gps')),
+                    'raw_coordinates_shared': False,
+                },
                 'coverage': {
                     'raw_points': sum(1 for r in rows if r.get('source_kind') == 'raw'),
                     'ha_history_points': sum(1 for r in rows if r.get('source_kind') == 'ha_history'),
@@ -1909,6 +2341,7 @@ class Handler(BaseHTTPRequestHandler):
             output = io.StringIO()
             fields = [
                 'source_ts', 'source_kind', 'aux_soc', 'hv_battery_level', 'odometer',
+                'fuel_level', 'geo_source_ts', 'gps_fix_age_hours',
                 'warning_level', 'sleep_mode', 'sensor_reliability', 'aux_fail_warning',
                 'battery_pre_warning', 'aux_source_ts', 'hv_source_ts', 'odometer_source_ts',
                 'charging_remaining_minutes'
@@ -1944,6 +2377,7 @@ class Handler(BaseHTTPRequestHandler):
                 'snapshots': [public_snapshot(r) for r in rows],
                 'intervals': intervals,
                 'journeys': journeys_from_intervals(intervals),
+                'outings': outings_from_intervals(intervals),
                 'since_last_trip': since_last_trip_context(rows, intervals),
                 'resolved_entities': RESOLVED_ENTITIES,
             })
