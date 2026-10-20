@@ -1551,7 +1551,7 @@ def group_journeys(rows, intervals):
         for number, idx in enumerate(group, start=1):
             interval = intervals[idx]
             old_type = interval['event_type']
-            interval['event_type'] = 'ride'
+            interval['event_type'] = 'movement_window'
             interval['label'] = 'Afstandstoename — meetinterval {}/{}'.format(number, len(group))
             interval['journey_id'] = jid
             interval['journey_interval_index'] = number
@@ -1643,6 +1643,7 @@ def group_outings(journeys, intervals, rows):
             'outing_id': oid,
             'from': first['from'], 'to': last['to'],
             'leg_count': len(group),
+            'trip_count_known': False,
             'total_distance_km': round(sum(j['distance_km'] for j in group), 3),
             'gps_return_to_start': is_return if return_distance is not None else None,
             'return_distance_km': return_distance,
@@ -1683,8 +1684,10 @@ def outings_from_intervals(intervals):
         result.append({
             'outing_id': key, 'from': group[0]['from'], 'to': group[-1]['to'],
             'leg_count': len(group),
+            'trip_count_known': False,
             'total_distance_km': round(sum(x['distance_km'] for x in group), 3),
             'journey_ids': [x['journey_id'] for x in group],
+            'inference': 'Aantal bewegingsvensters, niet het aantal echte ritten; cloud-polls kunnen meerdere ritten samenvatten.',
             'gps_return_to_start': gps_return,
             'return_distance_km': evidence.get('outing_return_distance_km'),
             'confidence': (
