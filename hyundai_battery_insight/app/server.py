@@ -1321,8 +1321,8 @@ def classify(prev, cur):
         facts.append('bron: HA historical correlation')
 
     if drove:
-        event_type = 'ride'
-        label = 'Rit tussen meetpunten'
+        event_type = 'movement_window'
+        label = 'Afstandstoename tussen meetpunten'
         inference = 'De odometerstijging (>1 km) ondersteunt dat er tussen deze meetpunten is gereden; 12V kan daarbij zijn bijgeladen.'
     elif aux_d is not None and aux_d <= -2:
         event_type = 'decline_minor_movement' if minor_movement else 'decline_no_ride'
@@ -1777,7 +1777,7 @@ def since_last_trip_context(rows, intervals):
 
     last_ride_i = None
     for i, interval in enumerate(intervals):
-        if interval.get('event_type') == 'ride':
+        if interval.get('event_type') == 'movement_window':
             last_ride_i = i
     if last_ride_i is None:
         return {'available': False, 'reason': 'Geen odometertoename gevonden binnen het gekozen tijdvenster.'}
