@@ -184,6 +184,14 @@ Hyundai Battery Insight is released under the [MIT License](LICENSE). You are fr
 
 For the in-app documentation and version history, see [DOCS.md](hyundai_battery_insight/DOCS.md) and [CHANGELOG.md](hyundai_battery_insight/CHANGELOG.md).
 
+## 0.1.13
+
+- Distinguishes net SoC changes between snapshots from an unknown real peak after charging, including an explicit **highest recorded 12V SoC** indicator.
+- Makes chart endpoint connectors dashed and less prominent so sleeping-time gaps are not mistaken for measured trajectories.
+- Marks small (up to 1 km) vehicle repositioning separately instead of automatically labelling it a normal trip and masking large 12V drops.
+- Adds **Intervalanalyse CSV** and **Intervalanalyse JSON** downloads for the exact selected visible period, including raw endpoint values, facts, inferences, unknowns, and the unobserved peak caveat.
+- Adds regression tests for interval classification and exports.
+
 ## 0.1.12
 
 - Adds **Vorige / Vandaag / Volgende** navigation for the 1/7/14/30/60/90-day timeline windows.
