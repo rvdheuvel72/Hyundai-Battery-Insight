@@ -73,11 +73,45 @@ def main():
             samples, intervals, dt.datetime(2026, 10, 19, tzinfo=dt.timezone.utc),
             dt.datetime(2026, 10, 21, tzinfo=dt.timezone.utc))
         assert len(doc["journeys"]) == 2 and len(doc["outings"]) == 1
-        assert len(m.interval_export_rows(samples, intervals)) == 3
+        exported = m.interval_export_rows(samples, intervals)
+        assert len(exported) == 3
+        assert doc["outings"][0]["gps_return_to_start"] is True
+        assert doc["outings"][0]["return_distance_km"] == 0
+        assert doc["outings"][0]["confidence"] == "GPS ondersteunt terugkeer"
+        for interval in (exported[0], exported[2]):
+            assert interval["outing_gps_return_to_start"] is True
+            assert interval["outing_return_distance_km"] == 0
+            assert "geo_latitude" not in interval
+
         backup = m.raw_backup_document()
         assert backup["gps_points"][0]["source_kind"] == "raw_ccs2"
         assert "geo_source_ts" in backup["snapshots"][0]
-        print("GPS freshness / fuel / 40-minute shop stop / backup: OK")
+
+        # A previous-format backup must update available fields without
+        # erasing fuel and GPS metadata that did not exist in that format.
+        m._current_vehicle_vin = lambda: None
+        older = {
+            "format": m.RAW_BACKUP_FORMAT,
+            "snapshots": [{
+                "source_ts": stale["source_ts"], "aux_soc": 64,
+                "odometer": 1000.0, "raw_json": None
+            }]
+        }
+        assert m.restore_raw_backup_document(older)["updated"] == 1
+        with m.db() as db:
+            restored = dict(db.execute(
+                "SELECT aux_soc, fuel_level, geo_source_ts, geo_latitude, "
+                "geo_longitude, geo_speed, geo_heading FROM snapshots "
+                "WHERE source_ts=?", (stale["source_ts"],)
+            ).fetchone())
+        assert restored["aux_soc"] == 64
+        assert restored["fuel_level"] == 33
+        assert restored["geo_source_ts"] == stale["geo_source_ts"]
+        assert restored["geo_latitude"] == stale["geo_latitude"]
+        assert restored["geo_longitude"] == stale["geo_longitude"]
+        assert restored["geo_speed"] == 0
+        assert restored["geo_heading"] == 320
+        print("GPS return evidence / legacy backup preservation / shopping stop: OK")
 
 if __name__ == "__main__":
     main()
