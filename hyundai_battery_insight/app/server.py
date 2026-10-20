@@ -1968,6 +1968,16 @@ def restore_raw_backup_document(document):
                 skipped += 1
                 continue
 
+            # Legacy backups may contain placeholder coordinates in snapshot rows.
+            # Never promote a zero pair into GPS evidence after restore.
+            lat = num(row.get('geo_latitude'))
+            lon = num(row.get('geo_longitude'))
+            if lat == 0 and lon == 0:
+                for key in ('geo_source_ts', 'geo_latitude', 'geo_longitude',
+                            'geo_speed', 'geo_heading'):
+                    row.pop(key, None)
+                present_cols = [key for key in present_cols if key in row]
+
             raw_value = row.get('raw_json')
             if raw_value is not None and not isinstance(raw_value, str):
                 skipped += 1
