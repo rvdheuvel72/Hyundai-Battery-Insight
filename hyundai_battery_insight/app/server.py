@@ -1389,8 +1389,14 @@ def group_journeys(rows, intervals):
             finish()
             # A large odometer jump across a sleep gap may indicate a trip,
             # but it cannot be joined to later short-interval driving samples.
-            if dist > JOURNEY_MIN_KM:
+            # Small movement spread over a long gap does not prove a drive.
+            if dist > 2.0:
                 groups.append([i])
+            else:
+                interval['inference'] += (
+                    ' Odometertoename over een groot meetgat; geen ritduur '
+                    'of tijdstip van de beweging aangetoond.'
+                )
             continue
         active.append(i)
     finish()
@@ -1410,8 +1416,30 @@ def group_journeys(rows, intervals):
             evidence = 'ha_statistics'
         else:
             evidence = 'ha_history'
+        sparse = any((intervals[i].get('hours') or 0) > JOURNEY_MAX_SAMPLE_GAP_HOURS
+                     for i in group)
+        aux_delta = (last['aux_soc'] - first['aux_soc']
+                     if last.get('aux_soc') is not None and first.get('aux_soc') is not None
+                     else None)
+        hv_delta = (last['ev_soc'] - first['ev_soc']
+                    if last.get('ev_soc') is not None and first.get('ev_soc') is not None
+                    else None)
+        gps_dist = gps_displacement_km(first, last)
+        supports = []
+        if hv_delta is not None and hv_delta <= -0.5:
+            supports.append('HV verbruik')
+        if aux_delta is not None and aux_delta >= 1:
+            supports.append('12V herstel')
+        if gps_dist is not None and gps_dist > GPS_STOP_RADIUS_KM:
+            supports.append('GPS verplaatsing')
+        confidence = ('laag' if sparse else (
+            'hoog' if len(supports) >= 2 else 'middel'
+        ))
         journey = {
             'journey_id': jid,
+            'gps_displacement_km': gps_dist,
+            'supporting_signals': ', '.join(supports) if supports else 'alleen odometer',
+            'confidence': confidence,
             'from': first['source_ts'], 'to': last['source_ts'],
             'distance_km': distance,
             'interval_count': len(group),
@@ -1439,6 +1467,14 @@ def group_journeys(rows, intervals):
             interval['journey_interval_index'] = number
             interval['journey_interval_count'] = len(group)
             interval['journey_distance_km'] = distance
+            interval['journey_confidence'] = confidence
+            interval['journey_supporting_signals'] = journey['supporting_signals']
+            interval['journey_gps_displacement_km'] = gps_dist
+            if sparse:
+                interval['unknown'] += (
+                    ' De beweging tussen deze endpoints kan veel korter hebben '
+                    'geduurd dan het meetgat: begin/einde van de rit onbekend.'
+                )
             interval['inference'] += (
                 ' Dit meetinterval hoort bij een vermoedelijke rit van '
                 f'{distance:g} km, opgebouwd uit {len(group)} '
@@ -1471,6 +1507,10 @@ def journeys_from_intervals(intervals):
             'distance_km': peers[0]['journey_distance_km'],
             'interval_count': len(peers),
             'measurement_count': len(peers) + 1,
+            'gps_displacement_km': peers[0].get('journey_gps_displacement_km'),
+            'supporting_signals': peers[0].get('journey_supporting_signals'),
+            'confidence': peers[0].get('journey_confidence', 'middel'),
+            'outing_id': peers[0].get('outing_id'),
             'source_quality': (
                 'ha_statistics' if any(x['source_quality'] == 'ha_statistics' for x in peers)
                 else 'ha_history' if any(x['source_quality'] != 'raw' for x in peers)
@@ -1479,6 +1519,75 @@ def journeys_from_intervals(intervals):
             'inference': 'Vermoedelijke rit op basis van cumulatieve kilometerstand; begin/eindtijden zijn meetgrenzen, geen bewezen contactmomenten.',
         })
     return summaries
+
+
+
+def group_outings(journeys, intervals, rows):
+    """Group nearby driving legs into a *possible* outing, never one long drive."""
+    groups = []
+    active = []
+    for journey in journeys:
+        if active:
+            previous = active[-1]
+            previous_end, this_start = iso_to_dt(previous['to']), iso_to_dt(journey['from'])
+            gap_h = ((this_start - previous_end).total_seconds() / 3600.0
+                     if previous_end and this_start else None)
+            if gap_h is None or not (0 <= gap_h <= OUTING_MAX_STOP_HOURS):
+                if len(active) > 1:
+                    groups.append(active)
+                active = []
+        active.append(journey)
+    if len(active) > 1:
+        groups.append(active)
+
+    outings = []
+    for group in groups:
+        first, last = group[0], group[-1]
+        oid = 'outing-' + first['from']
+        start = next((row for row in rows if row.get('source_ts') == first['from']), None)
+        end = next((row for row in rows if row.get('source_ts') == last['to']), None)
+        return_distance = gps_displacement_km(start, end) if start and end else None
+        is_return = return_distance is not None and return_distance <= GPS_STOP_RADIUS_KM
+        outing = {
+            'outing_id': oid,
+            'from': first['from'], 'to': last['to'],
+            'leg_count': len(group),
+            'total_distance_km': round(sum(j['distance_km'] for j in group), 3),
+            'gps_return_to_start': is_return if return_distance is not None else None,
+            'return_distance_km': return_distance,
+            'confidence': ('GPS ondersteunt terugkeer' if is_return
+                           else 'mogelijke uitstap; terugkeer onbewezen'),
+            'inference': (
+                'Aparte rijtrajecten met tussenliggende stilstand zijn gekoppeld '
+                'op basis van tijd. De auto heeft niet continu gereden; '
+                'een gelijk begin- en eindpunt kan alleen met tijdige GPS-metingen '
+                'worden ondersteund.'
+            ),
+        }
+        outings.append(outing)
+        for journey in group:
+            journey['outing_id'] = oid
+        for it in intervals:
+            if it.get('journey_id') in {j['journey_id'] for j in group}:
+                it['outing_id'] = oid
+    return outings
+
+
+def outings_from_intervals(intervals):
+    """Build safe, coordinate-free outing summaries for API and exports."""
+    journeys = journeys_from_intervals(intervals)
+    grouped = {}
+    for journey in journeys:
+        oid = journey.get('outing_id')
+        if oid:
+            grouped.setdefault(oid, []).append(journey)
+    return [{
+        'outing_id': key, 'from': group[0]['from'], 'to': group[-1]['to'],
+        'leg_count': len(group),
+        'total_distance_km': round(sum(x['distance_km'] for x in group), 3),
+        'journey_ids': [x['journey_id'] for x in group],
+        'confidence': 'Mogelijke uitstap; alleen op tijd/afstanden gegroepeerd',
+    } for key, group in grouped.items()]
 
 
 def query_timeline_range(start, end):
@@ -1521,11 +1630,17 @@ def query_timeline_range(start, end):
         combined.append(row)
 
     combined.sort(key=lambda row: row['source_ts'])
+    positions = gps_points_range(
+        start - dt.timedelta(seconds=GPS_MAX_SAMPLE_AGE_SECONDS),
+        end + dt.timedelta(seconds=GPS_MAX_SAMPLE_AGE_SECONDS)
+    )
+    attach_fresh_gps(combined, positions)
     intervals = [
         classify(combined[i - 1], combined[i])
         for i in range(1, len(combined))
     ]
-    group_journeys(combined, intervals)
+    legs = group_journeys(combined, intervals)
+    group_outings(legs, intervals, combined)
     return combined, intervals, raw
 
 
@@ -1843,6 +1958,8 @@ INTERVAL_EXPORT_COLUMNS = (
     'odometer_start', 'odometer_end', 'odometer_delta_km',
     'netto_pp_per_24h', 'real_peak_12v_soc', 'journey_id',
     'journey_interval_index', 'journey_interval_count', 'journey_distance_km',
+    'journey_confidence', 'journey_supporting_signals', 'journey_gps_displacement_km',
+    'outing_id',
     'facts', 'inference', 'unknown',
 )
 INTERVAL_EXPORT_NOTE = (
@@ -1881,6 +1998,10 @@ def interval_export_rows(rows, intervals):
             'journey_interval_index': interval.get('journey_interval_index'),
             'journey_interval_count': interval.get('journey_interval_count'),
             'journey_distance_km': interval.get('journey_distance_km'),
+            'journey_confidence': interval.get('journey_confidence'),
+            'journey_supporting_signals': interval.get('journey_supporting_signals'),
+            'journey_gps_displacement_km': interval.get('journey_gps_displacement_km'),
+            'outing_id': interval.get('outing_id'),
             'facts': interval.get('facts'),
             'inference': interval.get('inference'),
             'unknown': interval.get('unknown'),
@@ -1895,6 +2016,7 @@ def interval_export_document(rows, intervals, range_start, range_end):
         'interpretation_note': INTERVAL_EXPORT_NOTE,
         'interval_count': len(intervals),
         'journeys': journeys_from_intervals(intervals),
+        'outings': outings_from_intervals(intervals),
         'intervals': interval_export_rows(rows, intervals),
     }
 
@@ -1973,6 +2095,12 @@ class Handler(BaseHTTPRequestHandler):
                 'snapshots': [public_snapshot(r) for r in rows],
                 'intervals': intervals,
                 'journeys': journeys_from_intervals(intervals),
+                'outings': outings_from_intervals(intervals),
+                'gps': {
+                    'configured_entity': OPTIONS.get('gps_entity'),
+                    'matched_measurements': sum(1 for r in rows if r.get('_gps')),
+                    'raw_coordinates_shared': False,
+                },
                 'coverage': {
                     'raw_points': sum(1 for r in rows if r.get('source_kind') == 'raw'),
                     'ha_history_points': sum(1 for r in rows if r.get('source_kind') == 'ha_history'),
@@ -2076,6 +2204,7 @@ class Handler(BaseHTTPRequestHandler):
                 'snapshots': [public_snapshot(r) for r in rows],
                 'intervals': intervals,
                 'journeys': journeys_from_intervals(intervals),
+                'outings': outings_from_intervals(intervals),
                 'since_last_trip': since_last_trip_context(rows, intervals),
                 'resolved_entities': RESOLVED_ENTITIES,
             })
