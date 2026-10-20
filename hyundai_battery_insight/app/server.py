@@ -5,6 +5,7 @@ import datetime as dt
 import hashlib
 import hmac
 import io
+import math
 import json
 import os
 import re
@@ -37,6 +38,7 @@ RAW_BACKUP_COLUMNS = (
     'accessory', 'ignition1', 'ignition3', 'connector_fastening',
     'charging_remain_time', 'ev_charging', 'raw_json',
 )
+GPS_BACKUP_COLUMNS = ('source_ts', 'latitude', 'longitude', 'source_kind')
 HISTORY_BACKUP_COLUMNS = (
     'source_ts', 'aux_soc', 'ev_soc', 'odometer',
     'aux_source_ts', 'ev_source_ts', 'odometer_source_ts', 'imported_ts',
@@ -72,6 +74,7 @@ DEFAULTS = {
     'aux_soc_entity': 'auto',
     'hv_battery_entity': 'auto',
     'odometer_entity': 'auto',
+    'gps_entity': 'device_tracker.tucson_location_2',
     'lookback_days': 120,
     'poll_seconds': 300,
     'import_on_start': True,
@@ -161,6 +164,14 @@ def init_db():
             "WHERE source_kind IS NULL OR source_kind=''"
         )
         c.execute('CREATE INDEX IF NOT EXISTS idx_ha_history_source_ts ON ha_history_points(source_ts)')
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS gps_points (
+            source_ts TEXT PRIMARY KEY,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
+            source_kind TEXT NOT NULL
+        )
+        ''')
         c.commit()
 
 
@@ -568,7 +579,116 @@ def get_current_state(entity_id):
         return None
 
 
+
+# GPS timestamps are Home Assistant state-update times, not verified satellite
+# fix times. No geolocation service or forced Hyundai refresh is invoked.
+GPS_MAX_SAMPLE_AGE_SECONDS = 10 * 60
+GPS_STOP_RADIUS_KM = 0.15
+OUTING_MAX_STOP_HOURS = 2.0
+
+
+def valid_position(state):
+    """Extract a valid tracker coordinate; reject unknown/unavailable states."""
+    if not isinstance(state, dict):
+        return None
+    if state.get('state') in ('unknown', 'unavailable'):
+        return None
+    attrs = state.get('attributes') or {}
+    lat, lon = num(attrs.get('latitude')), num(attrs.get('longitude'))
+    if lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return None
+    stamp = parse_vehicle_ts(None, state.get('last_updated') or state.get('last_changed'))
+    if not stamp:
+        return None
+    return {'source_ts': stamp, 'latitude': lat, 'longitude': lon,
+            'source_kind': 'ha_tracker'}
+
+
+def upsert_gps_position(point):
+    if not point:
+        return False
+    with db() as conn:
+        exists = conn.execute(
+            'SELECT 1 FROM gps_points WHERE source_ts=?', (point['source_ts'],)
+        ).fetchone()
+        conn.execute(
+            '''INSERT INTO gps_points (source_ts, latitude, longitude, source_kind)
+               VALUES (:source_ts, :latitude, :longitude, :source_kind)
+               ON CONFLICT(source_ts) DO UPDATE SET
+                 latitude=excluded.latitude, longitude=excluded.longitude,
+                 source_kind=excluded.source_kind''', point
+        )
+        conn.commit()
+    return exists is None
+
+
+def import_gps_history(start, end):
+    """Read existing HA tracker history without commanding/awakening the car."""
+    entity = OPTIONS.get('gps_entity', '').strip()
+    if not entity:
+        return {'inserted': 0, 'valid': 0, 'unavailable': True}
+    count = inserted = 0
+    cursor = start
+    while cursor < end:
+        stop = min(cursor + dt.timedelta(days=14), end)
+        try:
+            for state in history_chunk(entity, cursor, stop):
+                point = valid_position(state)
+                if point and start <= iso_to_dt(point['source_ts']) <= stop:
+                    count += 1
+                    inserted += int(upsert_gps_position(point))
+        except Exception as exc:
+            print(f'[GPS] history import warning: {exc}', flush=True)
+        cursor = stop
+    return {'inserted': inserted, 'valid': count, 'unavailable': False}
+
+
+def gps_points_range(start, end):
+    with db() as conn:
+        return [dict(row) for row in conn.execute(
+            'SELECT * FROM gps_points WHERE source_ts >= ? AND source_ts < ? ORDER BY source_ts',
+            (start.isoformat(), end.isoformat())
+        ).fetchall()]
+
+
+def haversine_km(a_lat, a_lon, b_lat, b_lon):
+    phi1, phi2 = math.radians(a_lat), math.radians(b_lat)
+    dphi, dlambda = phi2 - phi1, math.radians(b_lon - a_lon)
+    value = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
+    return 6371.0 * 2 * math.asin(min(1.0, math.sqrt(max(0.0, value))))
+
+
+def attach_fresh_gps(rows, gps_points):
+    """Only correlate a recent, actually stored tracker event, never a stale fix."""
+    times = [iso_to_dt(g['source_ts']) for g in gps_points]
+    for row in rows:
+        row.pop('_gps', None)
+        timestamp = iso_to_dt(row.get('source_ts'))
+        if not timestamp or not times:
+            continue
+        pos = bisect.bisect_left(times, timestamp)
+        candidates = [i for i in (pos-1, pos) if 0 <= i < len(times)]
+        closest = min(candidates, key=lambda i: abs((times[i]-timestamp).total_seconds()))
+        age = abs((times[closest]-timestamp).total_seconds())
+        if age <= GPS_MAX_SAMPLE_AGE_SECONDS:
+            row['_gps'] = gps_points[closest]
+
+
+def gps_displacement_km(a, b):
+    pos_a, pos_b = a.get('_gps'), b.get('_gps')
+    if not pos_a or not pos_b or pos_a['source_ts'] == pos_b['source_ts']:
+        return None
+    return round(haversine_km(
+        pos_a['latitude'], pos_a['longitude'],
+        pos_b['latitude'], pos_b['longitude']
+    ), 3)
+
+
 def poll_once():
+    try:
+        poll_gps_from_ha()
+    except Exception as exc:
+        print(f'[GPS] tracker state unavailable: {exc}', flush=True)
     raw = get_current_state(OPTIONS.get('raw_entity', ''))
     if raw:
         snap = extract_snapshot(raw)
@@ -576,6 +696,14 @@ def poll_once():
             upsert_snapshot(snap)
             return find_vin(raw)
     return None
+
+
+def poll_gps_from_ha():
+    """Collect an existing tracker state without forcing a vehicle update."""
+    entity = OPTIONS.get('gps_entity', '').strip()
+    if not entity:
+        return False
+    return upsert_gps_position(valid_position(get_current_state(entity)))
 
 
 def history_chunk(entity, start, end):
@@ -1011,10 +1139,12 @@ def rebuild_correlated_history_range(start, end):
         correlated = import_correlated_history(
             start, end, include_statistics=True
         )
+        gps = import_gps_history(start, end)
         return {
             'start': start.isoformat(),
             'end': end.isoformat(),
             'correlated': correlated,
+            'gps': gps,
         }
 
 
@@ -1035,12 +1165,14 @@ def import_history():
         start = now - dt.timedelta(days=OPTIONS['lookback_days'])
         raw_count = import_raw_history(start, now)
         correlated = import_correlated_history(start, now)
+        gps = import_gps_history(start, now)
         return {
             'lookback_days': OPTIONS['lookback_days'],
             'start': start.isoformat(),
             'end': now.isoformat(),
             'raw_processed': raw_count,
             'correlated': correlated,
+            'gps': gps,
         }
 
 
