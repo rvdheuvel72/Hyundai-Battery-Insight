@@ -2015,7 +2015,7 @@ def restore_raw_backup_document(document):
 
     gps_inserted = gps_skipped = 0
     for source in gps_points:
-        if not isinstance(source, dict) or source.get('source_kind') != 'ha_tracker':
+        if not isinstance(source, dict) or source.get('source_kind') not in ('ha_tracker', 'raw_ccs2'):
             gps_skipped += 1
             continue
         point = {key: source.get(key) for key in GPS_BACKUP_COLUMNS}
