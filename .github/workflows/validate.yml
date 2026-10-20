@@ -568,6 +568,9 @@ jobs:
           print("interval analysis and unknown peak exports: OK")
           PY
 
+      - name: Test raw location freshness and shopping outings
+        run: python scripts/test_raw_location_and_outings.py
+
       - name: Test grouped journeys and P2 regressions
         run: |
           python - <<'PY'
