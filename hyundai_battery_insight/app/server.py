@@ -1766,6 +1766,11 @@ def raw_backup_document():
                 'SELECT * FROM ha_history_points ORDER BY source_ts'
             ).fetchall()
         ]
+        gps_rows = [
+            dict(row) for row in conn.execute(
+                'SELECT * FROM gps_points ORDER BY source_ts'
+            ).fetchall()
+        ]
 
     vehicle_fingerprint = None
     for row in reversed(rows):
@@ -1786,6 +1791,7 @@ def raw_backup_document():
         'vehicle_fingerprint': vehicle_fingerprint,
         'snapshot_count': len(rows),
         'history_point_count': len(history_rows),
+        'gps_point_count': len(gps_rows),
         'snapshots': [
             {column: row.get(column) for column in RAW_BACKUP_COLUMNS}
             for row in rows
@@ -1793,6 +1799,12 @@ def raw_backup_document():
         'ha_history_points': [
             {column: row.get(column) for column in HISTORY_BACKUP_COLUMNS}
             for row in history_rows
+        ],
+        # GPS coordinates are sensitive: included only in the explicitly
+        # requested full DATA BACKUP, never normal sample/interval exports.
+        'gps_points': [
+            {column: row.get(column) for column in GPS_BACKUP_COLUMNS}
+            for row in gps_rows
         ],
     }
 
@@ -1821,6 +1833,12 @@ def restore_raw_backup_document(document):
     )
     if not isinstance(history_points, list):
         raise ValueError('HBI-backup bevat geen geldige HA-historie-lijst.')
+    gps_points = (
+        document.get('gps_points', [])
+        if backup_format == DATA_BACKUP_FORMAT else []
+    )
+    if not isinstance(gps_points, list):
+        raise ValueError('HBI-backup bevat geen geldige GPS-puntenlijst.')
 
     current_vin = _current_vehicle_vin()
     backup_fingerprint = document.get('vehicle_fingerprint')
@@ -1910,6 +1928,22 @@ def restore_raw_backup_document(document):
         else:
             history_unchanged += 1
 
+    gps_inserted = gps_skipped = 0
+    for source in gps_points:
+        if not isinstance(source, dict) or source.get('source_kind') != 'ha_tracker':
+            gps_skipped += 1
+            continue
+        point = {key: source.get(key) for key in GPS_BACKUP_COLUMNS}
+        when = point.get('source_ts')
+        lat, lon = num(point.get('latitude')), num(point.get('longitude'))
+        if (not isinstance(when, str) or not iso_to_dt(when)
+                or lat is None or lon is None
+                or not (-90 <= lat <= 90 and -180 <= lon <= 180)):
+            gps_skipped += 1
+            continue
+        point['latitude'], point['longitude'] = lat, lon
+        gps_inserted += int(upsert_gps_position(point))
+
     # This also upgrades any legacy plaintext rows from older backups.
     if current_vin:
         migrate_raw_payloads(current_vin)
@@ -1926,6 +1960,9 @@ def restore_raw_backup_document(document):
         'history_unchanged': history_unchanged,
         'history_skipped': history_skipped,
         'history_total_in_file': len(history_points),
+        'gps_total_in_file': len(gps_points),
+        'gps_inserted': gps_inserted,
+        'gps_skipped': gps_skipped,
     }
 
 
