@@ -41,8 +41,10 @@ jobs:
           def without_version(content):
               return '\\n'.join(line for line in content.splitlines()
                                  if not line.startswith('version:'))
+          documentation = {'hyundai_battery_insight/CHANGELOG.md',
+                           'hyundai_battery_insight/README.md'}
           runtime = [p for p in changed if p.startswith('hyundai_battery_insight/')
-                     and p != config_path]
+                     and p != config_path and p not in documentation]
           if config_path in changed and without_version(old_text) != without_version(new_text):
               runtime.append(config_path)
           if runtime:
