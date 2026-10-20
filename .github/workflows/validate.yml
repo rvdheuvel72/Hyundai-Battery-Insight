@@ -33,13 +33,19 @@ jobs:
           changed = subprocess.check_output(
               ['git', 'diff', '--name-only', base, 'HEAD'], text=True
           ).splitlines()
+          config_path = 'hyundai_battery_insight/config.yaml'
+          old_text = subprocess.check_output(
+              ['git', 'show', f'{base}:{config_path}'], text=True
+          )
+          new_text = Path(config_path).read_text()
+          def without_version(content):
+              return '\\n'.join(line for line in content.splitlines()
+                                 if not line.startswith('version:'))
           runtime = [p for p in changed if p.startswith('hyundai_battery_insight/')
-                     and p != 'hyundai_battery_insight/config.yaml']
+                     and p != config_path]
+          if config_path in changed and without_version(old_text) != without_version(new_text):
+              runtime.append(config_path)
           if runtime:
-              old_text = subprocess.check_output(
-                  ['git', 'show', f'{base}:hyundai_battery_insight/config.yaml'], text=True
-              )
-              new_text = Path('hyundai_battery_insight/config.yaml').read_text()
               def version(content):
                   for line in content.splitlines():
                       if line.startswith('version:'):
