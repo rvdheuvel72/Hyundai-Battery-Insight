@@ -70,6 +70,9 @@ def main():
         intervals = [m.classify(a, b) for a, b in zip(samples, samples[1:])]
         legs = m.group_journeys(samples, intervals)
         assert len(legs) == 2
+        assert all(j['trip_count_known'] is False for j in legs)
+        assert all('meerdere ritten' in j['inference'] for j in legs)
+        assert intervals[0]['label'].startswith('Afstandstoename')
         assert [j["distance_km"] for j in legs] == [8, 8]
         assert intervals[1]["event_type"] != "ride"
         assert all("GPS verplaatsing" in j["supporting_signals"] for j in legs)
@@ -79,6 +82,7 @@ def main():
             samples, intervals, dt.datetime(2026, 10, 19, tzinfo=dt.timezone.utc),
             dt.datetime(2026, 10, 21, tzinfo=dt.timezone.utc))
         assert len(doc["journeys"]) == 2 and len(doc["outings"]) == 1
+        assert all(j["trip_count_known"] is False for j in doc["journeys"])
         exported = m.interval_export_rows(samples, intervals)
         assert len(exported) == 3
         assert doc["outings"][0]["gps_return_to_start"] is True
