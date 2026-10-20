@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.14
+
+- Resolves both Codex P2 findings reported against PR #1.
+- Groups contiguous odometer-increasing measurement intervals into one inferred journey after more than 1 km of accumulated movement, even when each individual increment is 1 km or less.
+- Keeps original raw/HA measurements and per-interval SoC/HV differences intact, with journey ID and sample position on each grouped interval.
+- Splits journey groups at no-movement intervals or source gaps over 45 minutes; sparse odometer jumps remain separate with uncertain start/end times.
+- Adds **Rittenanalyse**, showing inferred journey distance, number of constituent measurement points, time bounds and source quality.
+- Uses the last grouped journey endpoint and total journey distance as the standstill baseline.
+- Counts minor-movement SoC recoveries in the recovery summary.
+- Adds journey metadata to the interval CSV/JSON exports; JSON also contains the grouped journeys.
+- CI now fails closed until Codex finishes reviewing the exact pull request commit without outstanding P1/P2 findings, with a timeout rather than assuming ordinary tests imply review approval.
+- Includes automated tests for cumulative sub-kilometre movement, standstill context, minor-movement recovery counts, export persistence, long gaps and review-gate state evaluation.
+
 ## 0.1.13
 
 - Makes unobserved 12V SoC peaks after charging explicit: an endpoint delta is net, not the proven decline from the highest actual SoC.
