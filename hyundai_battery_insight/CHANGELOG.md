@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.15
+
+- Adds a configurable `gps_entity`, defaulting to `device_tracker.tucson_location_2`, reading only existing Home Assistant location states/history without triggering Hyundai refreshes.
+- Stores timestamped HA tracker coordinates in an additional persistent local SQLite table and supports restore from the existing optional full-data backup; ordinary charts and interval CSV/JSON do not export raw GPS coordinates.
+- Uses short-age (±10 min) GPS updates as optional supporting evidence together with mileage, HV battery use and 12V-SoC change; GPS alone does not assert a trip and stale/unavailable positions do not imply location.
+- Keeps separate **Rijtrajecten** (continuous-driving candidates) and **Uitstapjes** (multiple legs separated by parking), allowing 30–45 minute shopping stops to remain visible rather than being called one continuous journey.
+- Shows per-leg evidence strength and GPS displacement where available; return to origin is not asserted without fresh supporting GPS data.
+- Small 0.2 km parking repositionings remain minor movements; isolated <=2 km odometer movement across very long sleeping gaps is marked uncertain instead of a full journey.
+- Expands interval exports with optional GPS movement evidence and outing IDs, and extends full-data backups with location history (sensitive information).
+- Adds tests for GPS validation/staleness, local storage and backup, shopping stops, HV/12V supporting signals and regression checks.
+
 ## 0.1.14
 
 - Resolves both Codex P2 findings reported against PR #1.
