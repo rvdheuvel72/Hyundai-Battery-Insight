@@ -1443,7 +1443,9 @@ def _history_rows(days):
 
 
 
-# A journey is a group of adjacent odometer-increasing intervals. Measurements
+# A journey is an inferred movement window, not a verified ignition cycle.
+# Cloud polling may collapse multiple real drives into a single odometer delta.
+# Measurements
 # are NEVER merged or discarded: each retains its original timestamps/deltas.
 # A >1 km cumulative movement is a heuristic for a journey, not a verified
 # ignition cycle. Time gaps >45 min break grouping, including sleeping gaps.
@@ -1530,6 +1532,7 @@ def group_journeys(rows, intervals):
             'distance_km': distance,
             'interval_count': len(group),
             'measurement_count': len(group) + 1,
+            'trip_count_known': False,
             'source_quality': evidence,
             'start_odometer': first.get('odometer'),
             'end_odometer': last.get('odometer'),
@@ -1538,9 +1541,10 @@ def group_journeys(rows, intervals):
             'hv_battery_level_start': first.get('ev_soc'),
             'hv_battery_level_end': last.get('ev_soc'),
             'inference': (
-                'Opeenvolgende odometertoenames zijn als vermoedelijke rit '
-                'gegroepeerd; dit bewijst geen ononderbroken rit of exact '
-                'start-/eindtijdstip. Meetpunten blijven apart beschikbaar.'
+                'Dit is een meetvenster met odometertoename, geen bevestigde '
+                'afzonderlijke rit. Door cloud-polling kunnen meerdere ritten '
+                'tussen meetpunten vallen; aantal ritten en exacte rijtijden '
+                'zijn onbekend. Meetpunten blijven apart beschikbaar.'
             ),
         }
         journeys.append(journey)
@@ -1548,7 +1552,7 @@ def group_journeys(rows, intervals):
             interval = intervals[idx]
             old_type = interval['event_type']
             interval['event_type'] = 'ride'
-            interval['label'] = 'Rit — meetinterval {}/{}'.format(number, len(group))
+            interval['label'] = 'Afstandstoename — meetinterval {}/{}'.format(number, len(group))
             interval['journey_id'] = jid
             interval['journey_interval_index'] = number
             interval['journey_interval_count'] = len(group)
@@ -1562,9 +1566,9 @@ def group_journeys(rows, intervals):
                     'geduurd dan het meetgat: begin/einde van de rit onbekend.'
                 )
             interval['inference'] += (
-                ' Dit meetinterval hoort bij een vermoedelijke rit van '
-                f'{distance:g} km, opgebouwd uit {len(group)} '
-                'opeenvolgende meetintervallen; geen afzonderlijke rit.'
+                ' Dit meetinterval hoort bij een meetvenster met '
+                f'{distance:g} km odometertoename over {len(group)} '
+                'meetintervallen. Dit kan meerdere echte ritten omvatten.'
             )
             if old_type in ('decline_minor_movement', 'decline_no_ride'):
                 interval['inference'] += (
@@ -1593,6 +1597,7 @@ def journeys_from_intervals(intervals):
             'distance_km': peers[0]['journey_distance_km'],
             'interval_count': len(peers),
             'measurement_count': len(peers) + 1,
+            'trip_count_known': False,
             'gps_displacement_km': peers[0].get('journey_gps_displacement_km'),
             'supporting_signals': peers[0].get('journey_supporting_signals'),
             'confidence': peers[0].get('journey_confidence', 'middel'),
@@ -1602,7 +1607,7 @@ def journeys_from_intervals(intervals):
                 else 'ha_history' if any(x['source_quality'] != 'raw' for x in peers)
                 else 'raw'
             ),
-            'inference': 'Vermoedelijke rit op basis van cumulatieve kilometerstand; begin/eindtijden zijn meetgrenzen, geen bewezen contactmomenten.',
+            'inference': 'Meetvenster met odometertoename; meerdere ritten kunnen tussen cloud-polls vallen. Aantal ritten en rijtijden onbekend.',
         })
     return summaries
 
