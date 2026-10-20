@@ -89,6 +89,13 @@ def main():
             assert interval["outing_return_distance_km"] == 0
             assert "geo_latitude" not in interval
 
+        zero_backup = {'format': m.RAW_BACKUP_FORMAT, 'snapshots': [],
+                       'gps_points': [{'source_ts': '2026-10-20T16:00:00+00:00',
+                                       'latitude': 0, 'longitude': 0,
+                                       'source_kind': 'ha_tracker'}]}
+        zero_result = m.restore_raw_backup_document(zero_backup)
+        assert zero_result['gps_skipped'] == 1
+        assert zero_result['gps_inserted'] == 0
         backup = m.raw_backup_document()
         assert backup["gps_points"][0]["source_kind"] == "raw_ccs2"
         assert "geo_source_ts" in backup["snapshots"][0]
