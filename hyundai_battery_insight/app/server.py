@@ -1655,6 +1655,8 @@ def group_outings(journeys, intervals, rows):
         for it in intervals:
             if it.get('journey_id') in {j['journey_id'] for j in group}:
                 it['outing_id'] = oid
+                it['outing_gps_return_to_start'] = outing['gps_return_to_start']
+                it['outing_return_distance_km'] = return_distance
     return outings
 
 
