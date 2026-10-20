@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.13
+
+- Makes unobserved 12V SoC peaks after charging explicit: an endpoint delta is net, not the proven decline from the highest actual SoC.
+- Separately displays the highest **recorded** 12V SoC since the last detected trip; the actual peak remains unknown.
+- Draws dashed low-opacity chart connectors as a visual guide, not interpolated battery measurements.
+- Prevents a small odometer increase (up to 1 km) from masking a large 12V decline as a regular trip; treats small vehicle movements conservatively.
+- Prioritizes a marked 12V decline over a simultaneous HV Battery Level rise when classifying intervals.
+- Adds **Intervalanalyse CSV** and **Intervalanalyse JSON** download links covering exactly the selected visible date range.
+- Interval exports include timestamped endpoint values, measured deltas, source quality, facts, inference, unknowns and an explicit unknown actual peak.
+- Adds automated regression checks for small repositioning, unobserved peaks and interval exports.
+
 ## 0.1.12
 
 - Adds a sliding timeline window with **Vorige**, **Vandaag** and **Volgende** controls.
