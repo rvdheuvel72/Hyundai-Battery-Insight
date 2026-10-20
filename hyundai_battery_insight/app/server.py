@@ -1321,8 +1321,8 @@ def classify(prev, cur):
         facts.append('bron: HA historical correlation')
 
     if drove:
-        event_type = 'ride'
-        label = 'Rit tussen meetpunten'
+        event_type = 'movement_window'
+        label = 'Afstandstoename tussen meetpunten'
         inference = 'De odometerstijging (>1 km) ondersteunt dat er tussen deze meetpunten is gereden; 12V kan daarbij zijn bijgeladen.'
     elif aux_d is not None and aux_d <= -2:
         event_type = 'decline_minor_movement' if minor_movement else 'decline_no_ride'
@@ -1443,7 +1443,9 @@ def _history_rows(days):
 
 
 
-# A journey is a group of adjacent odometer-increasing intervals. Measurements
+# A journey is an inferred movement window, not a verified ignition cycle.
+# Cloud polling may collapse multiple real drives into a single odometer delta.
+# Measurements
 # are NEVER merged or discarded: each retains its original timestamps/deltas.
 # A >1 km cumulative movement is a heuristic for a journey, not a verified
 # ignition cycle. Time gaps >45 min break grouping, including sleeping gaps.
@@ -1530,6 +1532,7 @@ def group_journeys(rows, intervals):
             'distance_km': distance,
             'interval_count': len(group),
             'measurement_count': len(group) + 1,
+            'trip_count_known': False,
             'source_quality': evidence,
             'start_odometer': first.get('odometer'),
             'end_odometer': last.get('odometer'),
@@ -1538,17 +1541,18 @@ def group_journeys(rows, intervals):
             'hv_battery_level_start': first.get('ev_soc'),
             'hv_battery_level_end': last.get('ev_soc'),
             'inference': (
-                'Opeenvolgende odometertoenames zijn als vermoedelijke rit '
-                'gegroepeerd; dit bewijst geen ononderbroken rit of exact '
-                'start-/eindtijdstip. Meetpunten blijven apart beschikbaar.'
+                'Dit is een meetvenster met odometertoename, geen bevestigde '
+                'afzonderlijke rit. Door cloud-polling kunnen meerdere ritten '
+                'tussen meetpunten vallen; aantal ritten en exacte rijtijden '
+                'zijn onbekend. Meetpunten blijven apart beschikbaar.'
             ),
         }
         journeys.append(journey)
         for number, idx in enumerate(group, start=1):
             interval = intervals[idx]
             old_type = interval['event_type']
-            interval['event_type'] = 'ride'
-            interval['label'] = 'Rit — meetinterval {}/{}'.format(number, len(group))
+            interval['event_type'] = 'movement_window'
+            interval['label'] = 'Afstandstoename — meetinterval {}/{}'.format(number, len(group))
             interval['journey_id'] = jid
             interval['journey_interval_index'] = number
             interval['journey_interval_count'] = len(group)
@@ -1562,9 +1566,9 @@ def group_journeys(rows, intervals):
                     'geduurd dan het meetgat: begin/einde van de rit onbekend.'
                 )
             interval['inference'] += (
-                ' Dit meetinterval hoort bij een vermoedelijke rit van '
-                f'{distance:g} km, opgebouwd uit {len(group)} '
-                'opeenvolgende meetintervallen; geen afzonderlijke rit.'
+                ' Dit meetinterval hoort bij een meetvenster met '
+                f'{distance:g} km odometertoename over {len(group)} '
+                'meetintervallen. Dit kan meerdere echte ritten omvatten.'
             )
             if old_type in ('decline_minor_movement', 'decline_no_ride'):
                 interval['inference'] += (
@@ -1593,6 +1597,7 @@ def journeys_from_intervals(intervals):
             'distance_km': peers[0]['journey_distance_km'],
             'interval_count': len(peers),
             'measurement_count': len(peers) + 1,
+            'trip_count_known': False,
             'gps_displacement_km': peers[0].get('journey_gps_displacement_km'),
             'supporting_signals': peers[0].get('journey_supporting_signals'),
             'confidence': peers[0].get('journey_confidence', 'middel'),
@@ -1602,7 +1607,7 @@ def journeys_from_intervals(intervals):
                 else 'ha_history' if any(x['source_quality'] != 'raw' for x in peers)
                 else 'raw'
             ),
-            'inference': 'Vermoedelijke rit op basis van cumulatieve kilometerstand; begin/eindtijden zijn meetgrenzen, geen bewezen contactmomenten.',
+            'inference': 'Meetvenster met odometertoename; meerdere ritten kunnen tussen cloud-polls vallen. Aantal ritten en rijtijden onbekend.',
         })
     return summaries
 
@@ -1638,6 +1643,7 @@ def group_outings(journeys, intervals, rows):
             'outing_id': oid,
             'from': first['from'], 'to': last['to'],
             'leg_count': len(group),
+            'trip_count_known': False,
             'total_distance_km': round(sum(j['distance_km'] for j in group), 3),
             'gps_return_to_start': is_return if return_distance is not None else None,
             'return_distance_km': return_distance,
@@ -1678,8 +1684,10 @@ def outings_from_intervals(intervals):
         result.append({
             'outing_id': key, 'from': group[0]['from'], 'to': group[-1]['to'],
             'leg_count': len(group),
+            'trip_count_known': False,
             'total_distance_km': round(sum(x['distance_km'] for x in group), 3),
             'journey_ids': [x['journey_id'] for x in group],
+            'inference': 'Aantal bewegingsvensters, niet het aantal echte ritten; cloud-polls kunnen meerdere ritten samenvatten.',
             'gps_return_to_start': gps_return,
             'return_distance_km': evidence.get('outing_return_distance_km'),
             'confidence': (
@@ -1769,7 +1777,7 @@ def since_last_trip_context(rows, intervals):
 
     last_ride_i = None
     for i, interval in enumerate(intervals):
-        if interval.get('event_type') == 'ride':
+        if interval.get('event_type') == 'movement_window':
             last_ride_i = i
     if last_ride_i is None:
         return {'available': False, 'reason': 'Geen odometertoename gevonden binnen het gekozen tijdvenster.'}
