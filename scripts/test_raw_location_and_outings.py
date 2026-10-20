@@ -89,7 +89,7 @@ def main():
             assert interval["outing_return_distance_km"] == 0
             assert "geo_latitude" not in interval
 
-        zero_backup = {'format': m.RAW_BACKUP_FORMAT, 'snapshots': [],
+        zero_backup = {'format': m.DATA_BACKUP_FORMAT, 'snapshots': [],
                        'gps_points': [{'source_ts': '2026-10-20T16:00:00+00:00',
                                        'latitude': 0, 'longitude': 0,
                                        'source_kind': 'ha_tracker'}]}
