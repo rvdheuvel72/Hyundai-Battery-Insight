@@ -605,7 +605,7 @@ jobs:
           assert len(journeys) == 1
           assert journeys[0]["distance_km"] == 2.2
           assert journeys[0]["measurement_count"] == 4
-          assert [it["event_type"] for it in intervals[:3]] == ["ride"] * 3
+          assert [it["event_type"] for it in intervals[:3]] == ["movement_window"] * 3
           assert [it["journey_interval_index"] for it in intervals[:3]] == [1, 2, 3]
           assert len({it["journey_id"] for it in intervals[:3]}) == 1
           assert intervals[4]["event_type"] == "recovery_minor_movement"
