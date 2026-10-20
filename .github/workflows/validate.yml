@@ -16,6 +16,50 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require add-on version bump for runtime changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+
+          base = os.environ['BASE_SHA']
+          changed = subprocess.check_output(
+              ['git', 'diff', '--no-renames', '--name-only', base, 'HEAD'], text=True
+          ).splitlines()
+          config_path = 'hyundai_battery_insight/config.yaml'
+          old_text = subprocess.check_output(
+              ['git', 'show', f'{base}:{config_path}'], text=True
+          )
+          new_text = Path(config_path).read_text()
+          def without_version(content):
+              return '\\n'.join(line for line in content.splitlines()
+                                 if not line.startswith('version:'))
+          runtime = [p for p in changed if p.startswith('hyundai_battery_insight/')
+                     and p != config_path]
+          if config_path in changed and without_version(old_text) != without_version(new_text):
+              runtime.append(config_path)
+          if runtime:
+              def version(content):
+                  for line in content.splitlines():
+                      if line.startswith('version:'):
+                          return line.split(':', 1)[1].strip().strip('"').strip("'")
+                  raise SystemExit('Cannot determine add-on version')
+              old, new = version(old_text), version(new_text)
+              def parts(v):
+                  return tuple(map(int, str(v).split('.')))
+              if parts(new) <= parts(old):
+                  raise SystemExit(f'Runtime files changed but add-on version not bumped: {old} -> {new}. Files: {runtime}')
+              print(f'Add-on version bumped: {old} -> {new}')
+          else:
+              print('No runtime change requires an add-on version bump')
+          PY
 
       - name: Set up Python
         uses: actions/setup-python@v5
