@@ -33,6 +33,12 @@ def main():
         m.DB_PATH = Path(folder) / "insight.db"
         m.init_db()
         m.init_db()
+        tracker = {'state': 'home', 'last_updated': '2026-10-20T15:05:31+00:00',
+                   'attributes': {'latitude': 0, 'longitude': 0}}
+        assert m.valid_position(tracker) is None
+        tracker['attributes']['latitude'] = 52.0
+        tracker['attributes']['longitude'] = 4.0
+        assert m.valid_position(tracker) is not None
         stale = m.extract_snapshot(source("20260330102504.607"))
         assert stale["fuel_level"] == 33
         assert stale["geo_source_ts"].startswith("2026-03-30")
