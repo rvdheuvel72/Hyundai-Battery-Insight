@@ -54,7 +54,7 @@ Groups break on intervals without significant odometer increases and on interval
 
 The **Sinds laatste geregistreerde rit** baseline uses the last sample of the grouped journey and shows cumulative distance rather than only the final segment's distance. Minor-movement recovery events are counted in the summary without labelling them as full rides.
 
-The pull-request CI workflow includes an additional fail-closed **Codex review complete and clean** job. It waits for the review summary for the exact current PR commit, rejects unresolved findings (and P1/P2 inline findings against that commit), and fails when Codex does not complete in time. To make this job an enforced pre-merge requirement for everyone, configure GitHub branch protection/rulesets to require the job alongside `validate`. Merge only after both checks pass; a normal `validate` success is not a substitute for Codex review.
+The pull-request CI workflow includes an additional fail-closed **Codex review complete and clean** job. It waits for the review summary for the exact current PR commit, rejects unresolved findings reported by Codex's current review state (not stale inline comments from already-resolved discussions), and fails when Codex does not complete in time. To make this job an enforced pre-merge requirement for everyone, configure GitHub branch protection/rulesets to require the job alongside `validate`. Merge only after both checks pass; a normal `validate` success is not a substitute for Codex review.
 
 ### Measured SoC endpoints and missing peaks (0.1.13)
 
