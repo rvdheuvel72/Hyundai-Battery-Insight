@@ -73,6 +73,7 @@ def main():
         assert all(j['trip_count_known'] is False for j in legs)
         assert all('meerdere ritten' in j['inference'] for j in legs)
         assert intervals[0]['label'].startswith('Afstandstoename')
+        assert intervals[0]['event_type'] == 'movement_window'
         assert [j["distance_km"] for j in legs] == [8, 8]
         assert intervals[1]["event_type"] != "ride"
         assert all("GPS verplaatsing" in j["supporting_signals"] for j in legs)
@@ -83,6 +84,8 @@ def main():
             dt.datetime(2026, 10, 21, tzinfo=dt.timezone.utc))
         assert len(doc["journeys"]) == 2 and len(doc["outings"]) == 1
         assert all(j["trip_count_known"] is False for j in doc["journeys"])
+        assert doc['outings'][0]['trip_count_known'] is False
+        assert 'cloud-polls' in doc['outings'][0]['inference']
         exported = m.interval_export_rows(samples, intervals)
         assert len(exported) == 3
         assert doc["outings"][0]["gps_return_to_start"] is True
