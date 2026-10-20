@@ -2045,7 +2045,8 @@ def restore_raw_backup_document(document):
         lat, lon = num(point.get('latitude')), num(point.get('longitude'))
         if (not isinstance(when, str) or not iso_to_dt(when)
                 or lat is None or lon is None
-                or not (-90 <= lat <= 90 and -180 <= lon <= 180)):
+                or not (-90 <= lat <= 90 and -180 <= lon <= 180)
+                or (lat == 0 and lon == 0)):
             gps_skipped += 1
             continue
         point['latitude'], point['longitude'] = lat, lon
