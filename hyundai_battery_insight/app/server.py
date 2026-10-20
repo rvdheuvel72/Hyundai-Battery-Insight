@@ -1668,13 +1668,26 @@ def outings_from_intervals(intervals):
         oid = journey.get('outing_id')
         if oid:
             grouped.setdefault(oid, []).append(journey)
-    return [{
-        'outing_id': key, 'from': group[0]['from'], 'to': group[-1]['to'],
-        'leg_count': len(group),
-        'total_distance_km': round(sum(x['distance_km'] for x in group), 3),
-        'journey_ids': [x['journey_id'] for x in group],
-        'confidence': 'Mogelijke uitstap; alleen op tijd/afstanden gegroepeerd',
-    } for key, group in grouped.items()]
+    result = []
+    for key, group in grouped.items():
+        evidence = next(
+            (x for x in intervals if x.get('outing_id') == key), {}
+        )
+        gps_return = evidence.get('outing_gps_return_to_start')
+        result.append({
+            'outing_id': key, 'from': group[0]['from'], 'to': group[-1]['to'],
+            'leg_count': len(group),
+            'total_distance_km': round(sum(x['distance_km'] for x in group), 3),
+            'journey_ids': [x['journey_id'] for x in group],
+            'gps_return_to_start': gps_return,
+            'return_distance_km': evidence.get('outing_return_distance_km'),
+            'confidence': (
+                'GPS ondersteunt terugkeer' if gps_return is True
+                else 'GPS ondersteunt geen terugkeer' if gps_return is False
+                else 'Mogelijke uitstap; terugkeer onbewezen'
+            ),
+        })
+    return result
 
 
 def query_timeline_range(start, end):
@@ -2097,7 +2110,7 @@ INTERVAL_EXPORT_COLUMNS = (
     'netto_pp_per_24h', 'real_peak_12v_soc', 'journey_id',
     'journey_interval_index', 'journey_interval_count', 'journey_distance_km',
     'journey_confidence', 'journey_supporting_signals', 'journey_gps_displacement_km',
-    'outing_id',
+    'outing_id', 'outing_gps_return_to_start', 'outing_return_distance_km',
     'facts', 'inference', 'unknown',
 )
 INTERVAL_EXPORT_NOTE = (
@@ -2147,6 +2160,8 @@ def interval_export_rows(rows, intervals):
             'journey_supporting_signals': interval.get('journey_supporting_signals'),
             'journey_gps_displacement_km': interval.get('journey_gps_displacement_km'),
             'outing_id': interval.get('outing_id'),
+            'outing_gps_return_to_start': interval.get('outing_gps_return_to_start'),
+            'outing_return_distance_km': interval.get('outing_return_distance_km'),
             'facts': interval.get('facts'),
             'inference': interval.get('inference'),
             'unknown': interval.get('unknown'),
