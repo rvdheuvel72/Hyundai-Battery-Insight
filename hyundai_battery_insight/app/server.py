@@ -1072,7 +1072,10 @@ def classify(prev, cur):
     odo_d = delta(prev.get('odometer'), cur.get('odometer'))
     t1, t2 = iso_to_dt(prev.get('source_ts')), iso_to_dt(cur.get('source_ts'))
     hours = round((t2 - t1).total_seconds() / 3600, 2) if t1 and t2 else None
-    drove = odo_d is not None and odo_d > 0.05
+    # Up to 1 km can be a parking/charging repositioning, not a normal trip.
+    # Keep small odometer movements visible without masking 12V drops.
+    drove = odo_d is not None and odo_d > 1.0
+    minor_movement = odo_d is not None and 0.05 < odo_d <= 1.0
     raw_pair = prev.get('source_kind') == 'raw' and cur.get('source_kind') == 'raw'
     statistics_pair = (
         prev.get('source_kind') == 'ha_statistics'
@@ -1102,23 +1105,28 @@ def classify(prev, cur):
     if drove:
         event_type = 'ride'
         label = 'Rit tussen meetpunten'
-        inference = 'De odometerstijging ondersteunt dat er tussen deze meetpunten is gereden; 12V kan daarbij normaal zijn bijgeladen.'
+        inference = 'De odometerstijging (>1 km) ondersteunt dat er tussen deze meetpunten is gereden; 12V kan daarbij zijn bijgeladen.'
+    elif aux_d is not None and aux_d <= -2:
+        event_type = 'decline_minor_movement' if minor_movement else 'decline_no_ride'
+        label = ('12V-daling met kleine voertuigverplaatsing' if minor_movement
+                 else 'Lagere 12V-SoC bij volgend meetpunt')
+        inference = ('Netto daling tussen de gemeten endpoints. '
+                     'De hoogste tussentijdse SoC en het moment van de daling zijn onbekend.')
+        if minor_movement:
+            inference += ' De kleine odometertoename bewijst geen normale rit.'
+    elif aux_d is not None and aux_d >= 3:
+        event_type = 'recovery_minor_movement' if minor_movement else 'recovery_no_ride'
+        label = ('12V-herstel met kleine voertuigverplaatsing' if minor_movement
+                 else '12V-herstel zonder geregistreerde rit')
+        inference = 'Mogelijke bijlading of SoC-herkalibratie; alleen endpoints bewijzen geen laadcyclus.'
     elif ev_d is not None and ev_d >= 1:
         event_type = 'hv_increase_no_ride'
         label = 'HV Battery Level hoger zonder geregistreerde rit'
         inference = 'Dit is verenigbaar met laden tussen de meetpunten; de oorzaak is uit alleen deze endpoints niet definitief vast te stellen.'
-    elif aux_d is not None and aux_d >= 3:
-        event_type = 'recovery_no_ride'
-        label = '12V-herstel zonder geregistreerde rit'
-        if ev_d is not None and ev_d <= -1:
-            inference = ('De combinatie van 12V-herstel, geen odometertoename en een lager HV Battery Level '
-                         'is verenigbaar met HV→12V-bijlading, maar bewijst geen causale laadcyclus.')
-        else:
-            inference = 'Mogelijke automatische 12V-bijlading of SoC-herkalibratie; met endpoints alleen niet te onderscheiden.'
-    elif aux_d is not None and aux_d <= -2:
-        event_type = 'decline_no_ride'
-        label = 'Lagere 12V-SoC bij volgend meetpunt'
-        inference = 'Netto daling tussen meetpunten zonder geregistreerde rit. Het tussentijdse verloop is onbekend.'
+    elif minor_movement:
+        event_type = 'minor_movement'
+        label = 'Kleine voertuigverplaatsing'
+        inference = 'Een kleine odometertoename is geregistreerd; duur en omstandigheden van de verplaatsing zijn onbekend.'
     else:
         event_type = 'stable_no_ride'
         label = 'Geen grote 12V-verandering'
@@ -1133,6 +1141,13 @@ def classify(prev, cur):
     if not raw_pair:
         unknown_parts.append(
             'Dit interval bevat apart opgeslagen Home Assistant-sensorhistorie; waarden hoeven niet uit exact dezelfde voertuigsnapshot te komen.'
+        )
+    if aux_d is not None:
+        unknown_parts.append(
+            'De hoogste werkelijke 12V-SoC tussen deze meetpunten is onbekend: '
+            'een ongeregistreerde piek of SoC-herkalibratie kan het zichtbare '
+            'verschil beïnvloeden. Het netto endpointverschil is niet de '
+            'bewezen totale ontlading vanaf een eventuele piek.'
         )
     if not drove and ev_d is not None and abs(ev_d) < 0.5:
         unknown_parts.append(
@@ -1316,10 +1331,20 @@ def since_last_trip_context(rows, intervals):
     if rate is not None:
         facts.append(f'netto omgerekend {rate:+g} pp/24h')
 
+    measured_aux = [
+        (r['aux_soc'], r['source_ts']) for r in rows[baseline_index:]
+        if r.get('aux_soc') is not None
+    ]
+    highest_recorded_aux, highest_recorded_aux_ts = (
+        max(measured_aux, key=lambda x: x[0]) if measured_aux else (None, None)
+    )
     uses_history = any(r.get('source_kind') != 'raw' for r in rows[baseline_index:])
     unknown = (
         'Niet-geüploade laadcycli en SoC-herkalibraties tijdens slaap blijven onbekend. '
         'HV Battery Level wordt in hele procentpunten weergegeven, waardoor kleine HV→12V-energieoverdracht onzichtbaar kan blijven. '
+        'De hoogst werkelijk bereikte 12V-SoC na laden of herkalibratie is onbekend: '
+        'tussenliggende pieken kunnen ontbreken. De hoogste geregistreerde waarde '
+        'is alleen het maximum van aanwezige meetpunten. '
         'De pp/24h-waarde is endpoint-normalisatie en geen gemeten continue lekstroom.'
     )
     if uses_history:
@@ -1332,6 +1357,9 @@ def since_last_trip_context(rows, intervals):
         'hours': hours,
         'aux_start': baseline.get('aux_soc'), 'aux_end': latest.get('aux_soc'),
         'aux_delta': aux_d, 'aux_rate_24h': rate,
+        'highest_recorded_aux_soc': highest_recorded_aux,
+        'highest_recorded_aux_ts': highest_recorded_aux_ts,
+        'actual_peak_aux_soc_known': False,
         'hv_start': baseline.get('ev_soc'), 'hv_end': latest.get('ev_soc'), 'hv_delta': ev_d,
         'odo_start': baseline.get('odometer'), 'odo_end': latest.get('odometer'), 'odo_delta': odo_d,
         'last_trip_distance': last_ride.get('odo_delta'),
@@ -1546,6 +1574,64 @@ def public_snapshot(r):
     }
 
 
+# Export the interval analysis, not merely its point data. The real maximum
+# between two snapshots is never inferred from endpoint or visible-range maxima.
+INTERVAL_EXPORT_COLUMNS = (
+    'from', 'to', 'hours', 'source_quality', 'event_type', 'label',
+    'aux_soc_start', 'aux_soc_end', 'aux_delta_pp',
+    'hv_battery_level_start', 'hv_battery_level_end', 'hv_battery_level_delta_pp',
+    'odometer_start', 'odometer_end', 'odometer_delta_km',
+    'netto_pp_per_24h', 'real_peak_12v_soc', 'facts', 'inference', 'unknown',
+)
+INTERVAL_EXPORT_NOTE = (
+    'Waarden zijn gemeten endpoints, geen continu verloop. Een ongeregistreerde '
+    '12V-SoC-piek of herkalibratie tussen de meetpunten kan ontbreken. De werkelijke '
+    'piek en de daling vanaf die piek zijn onbekend. Kleine odometerverschillen '
+    '(tot en met 1 km) bewijzen geen normale rit.'
+)
+
+
+def interval_export_rows(rows, intervals):
+    """Export exactly the visible intervals, pairing each with its endpoints."""
+    exported = []
+    for i, interval in enumerate(intervals):
+        if i + 1 >= len(rows):
+            break
+        start, end = rows[i], rows[i + 1]
+        exported.append({
+            'from': interval.get('from'), 'to': interval.get('to'),
+            'hours': interval.get('hours'),
+            'source_quality': interval.get('source_quality'),
+            'event_type': interval.get('event_type'),
+            'label': interval.get('label'),
+            'aux_soc_start': start.get('aux_soc'),
+            'aux_soc_end': end.get('aux_soc'),
+            'aux_delta_pp': interval.get('aux_delta'),
+            'hv_battery_level_start': start.get('ev_soc'),
+            'hv_battery_level_end': end.get('ev_soc'),
+            'hv_battery_level_delta_pp': interval.get('hv_battery_level_delta'),
+            'odometer_start': start.get('odometer'),
+            'odometer_end': end.get('odometer'),
+            'odometer_delta_km': interval.get('odo_delta'),
+            'netto_pp_per_24h': interval.get('aux_rate_24h'),
+            'real_peak_12v_soc': 'unknown',
+            'facts': interval.get('facts'),
+            'inference': interval.get('inference'),
+            'unknown': interval.get('unknown'),
+        })
+    return exported
+
+
+def interval_export_document(rows, intervals, range_start, range_end):
+    return {
+        'format': 'hbi-interval-analysis-v1',
+        'range': {'start': range_start.isoformat(), 'end': range_end.isoformat()},
+        'interpretation_note': INTERVAL_EXPORT_NOTE,
+        'interval_count': len(intervals),
+        'intervals': interval_export_rows(rows, intervals),
+    }
+
+
 def current_context(raw_rows):
     if not raw_rows:
         return {}
@@ -1629,6 +1715,7 @@ class Handler(BaseHTTPRequestHandler):
                     'raw_snapshot': 'Raw points use the CCS2 vehicle timestamp and one nested vehicle_data payload.',
                     'history_correlation': 'Older points can combine separate Home Assistant histories for 12V, HV Battery Level and odometer. These are marked as HA historical correlation, not as one vehicle snapshot.',
                     'gap_rule': 'No interpolation is treated as a measurement; events while asleep can be invisible.',
+                    'peak_rule': 'The highest registered SoC is only the maximum sampled value; an unobserved peak or recalibration after charging remains unknown.',
                     'warning_level': 'Displayed as an API field; its exact Hyundai semantic is not assumed.',
                     'hv_battery_level_resolution': 'Whole-percent HV Battery Level can hide small HV-to-12V energy transfers.',
                     'rate_24h': 'Percentage-points per 24h is endpoint-normalized, not a continuous discharge-current measurement.',
@@ -1642,6 +1729,37 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({'ok': True})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)}, 500)
+            return
+        if path in ('/api/intervals.csv', '/api/intervals.json'):
+            try:
+                range_start, range_end = _request_range(
+                    qs, OPTIONS['lookback_days']
+                )
+                rows, intervals, _ = query_timeline_range(range_start, range_end)
+            except (TypeError, ValueError) as e:
+                self.send_json({'error': str(e)}, 400)
+                return
+            if path.endswith('.json'):
+                self.send_json_download(
+                    interval_export_document(rows, intervals, range_start, range_end),
+                    'hyundai_battery_insight_intervallen.json',
+                )
+            else:
+                output = io.StringIO()
+                writer = csv.DictWriter(output, fieldnames=INTERVAL_EXPORT_COLUMNS)
+                writer.writeheader()
+                writer.writerows(interval_export_rows(rows, intervals))
+                body = output.getvalue().encode('utf-8-sig')
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/csv; charset=utf-8')
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header(
+                    'Content-Disposition',
+                    'attachment; filename="hyundai_battery_insight_intervallen.csv"',
+                )
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
             return
         if path == '/api/export.csv':
             try:
