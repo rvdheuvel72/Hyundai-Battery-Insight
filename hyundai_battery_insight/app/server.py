@@ -658,22 +658,29 @@ def valid_position(state):
     if not stamp:
         return None
     return {'source_ts': stamp, 'latitude': lat, 'longitude': lon,
-            'source_kind': 'ha_tracker'}
+            'source_kind': 'ha_tracker', 'speed': None,
+            'speed_unit': None, 'heading': None}
 
 
 def upsert_gps_position(point):
     if not point:
+        return False
+    point = {name: point.get(name) for name in GPS_BACKUP_COLUMNS}
+    if point['source_kind'] not in ('raw_ccs2', 'ha_tracker'):
         return False
     with db() as conn:
         exists = conn.execute(
             'SELECT 1 FROM gps_points WHERE source_ts=?', (point['source_ts'],)
         ).fetchone()
         conn.execute(
-            '''INSERT INTO gps_points (source_ts, latitude, longitude, source_kind)
-               VALUES (:source_ts, :latitude, :longitude, :source_kind)
+            '''INSERT INTO gps_points (source_ts, latitude, longitude, source_kind, speed, speed_unit, heading)
+               VALUES (:source_ts, :latitude, :longitude, :source_kind, :speed, :speed_unit, :heading)
                ON CONFLICT(source_ts) DO UPDATE SET
                  latitude=excluded.latitude, longitude=excluded.longitude,
-                 source_kind=excluded.source_kind''', point
+                 source_kind=excluded.source_kind, speed=excluded.speed,
+                 speed_unit=excluded.speed_unit, heading=excluded.heading
+               WHERE excluded.source_kind='raw_ccs2'
+                  OR gps_points.source_kind != 'raw_ccs2' ''', point
         )
         conn.commit()
     return exists is None
@@ -716,16 +723,37 @@ def haversine_km(a_lat, a_lon, b_lat, b_lon):
 
 
 def attach_fresh_gps(rows, gps_points):
-    """Only correlate a recent, actually stored tracker event, never a stale fix."""
+    """Prefer the actual raw CCS2 GPS fix timestamp over copied HA state time."""
     times = [iso_to_dt(g['source_ts']) for g in gps_points]
     for row in rows:
         row.pop('_gps', None)
         timestamp = iso_to_dt(row.get('source_ts'))
-        if not timestamp or not times:
+        if not timestamp:
+            continue
+        raw_geo_ts = iso_to_dt(row.get('geo_source_ts'))
+        if raw_geo_ts:
+            # Explicitly stale raw positions must not be "freshened" by HA.
+            if (abs((raw_geo_ts-timestamp).total_seconds()) <= GPS_MAX_SAMPLE_AGE_SECONDS
+                    and row.get('geo_latitude') is not None
+                    and row.get('geo_longitude') is not None):
+                row['_gps'] = {
+                    'source_ts': row['geo_source_ts'],
+                    'latitude': row['geo_latitude'],
+                    'longitude': row['geo_longitude'],
+                    'source_kind': 'raw_ccs2',
+                    'speed': row.get('geo_speed'),
+                    'speed_unit': row.get('geo_speed_unit'),
+                    'heading': row.get('geo_heading'),
+                }
+            continue
+        if not times:
             continue
         pos = bisect.bisect_left(times, timestamp)
         candidates = [i for i in (pos-1, pos) if 0 <= i < len(times)]
-        closest = min(candidates, key=lambda i: abs((times[i]-timestamp).total_seconds()))
+        closest = min(candidates, key=lambda i: (
+            abs((times[i]-timestamp).total_seconds()),
+            gps_points[i].get('source_kind') != 'raw_ccs2',
+        ))
         age = abs((times[closest]-timestamp).total_seconds())
         if age <= GPS_MAX_SAMPLE_AGE_SECONDS:
             row['_gps'] = gps_points[closest]
