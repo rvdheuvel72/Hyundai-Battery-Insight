@@ -46,6 +46,27 @@ The rebuild result reports the available detailed and long-term source ranges fo
 
 These correlated values are useful for trends, but they are not treated as equivalent to one raw vehicle snapshot.
 
+### Measured SoC endpoints and missing peaks (0.1.13)
+
+A 12V SoC recovery after charging may continue while the vehicle is asleep; the app might not receive the true maximum. **Highest recorded SoC** is calculated only from available measurements since the last detected trip, not the unknown real peak.
+
+A 12V delta between endpoints is **net change**, not a proven total decline from a possible unobserved maximum. Changes in the battery management system's SoC estimate or recalibration are also possible.
+
+The timeline visually links known samples with light dashed lines, never with measured or interpolated points.
+
+Short movements (up to and including 1 km) are distinguished from regular trips. This conservative heuristic prevents a 0.2 km parking/charging repositioning from hiding a significant 12V decline; it does not mean every trip shorter than 1 km is impossible.
+
+### Interval analysis exports (0.1.13)
+
+**Intervalanalyse CSV** and **Intervalanalyse JSON** use the selected visible date range, the same as the chart and its existing point exports.
+
+- CSV: `/api/intervals.csv?start=<ISO8601>&end=<ISO8601>`
+- JSON: `/api/intervals.json?start=<ISO8601>&end=<ISO8601>`
+- Includes start/end timestamps, their 12V/HV/odometer values, net changes, classification, source quality, and the `VERIFIED FACT`, `INFERENCE`, `UNKNOWN` explanations.
+- `real_peak_12v_soc` is always `unknown`, because the app cannot reconstruct the true intermediate peak.
+- JSON includes an explicit interpretation note and export date range; CSV always provides a header, even if the selected range contains no intervals.
+- Neither export wakes the car or includes encrypted full raw payloads.
+
 ### No interpolation
 
 Periods with no uploaded vehicle data remain unknown. The app does not invent intermediate battery measurements.
