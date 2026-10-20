@@ -1250,11 +1250,16 @@ def group_journeys(rows, intervals):
             finish()
             continue
         hours = interval.get('hours')
-        if active and (
-            hours is None or hours <= 0
-            or hours > JOURNEY_MAX_SAMPLE_GAP_HOURS
-        ):
+        if hours is None or hours <= 0:
             finish()
+            continue
+        if hours > JOURNEY_MAX_SAMPLE_GAP_HOURS:
+            finish()
+            # A large odometer jump across a sleep gap may indicate a trip,
+            # but it cannot be joined to later short-interval driving samples.
+            if dist > JOURNEY_MIN_KM:
+                groups.append([i])
+            continue
         active.append(i)
     finish()
 
