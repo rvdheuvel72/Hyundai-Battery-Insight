@@ -1937,14 +1937,6 @@ def restore_raw_backup_document(document):
     updated = 0
     skipped = 0
     cols = list(RAW_BACKUP_COLUMNS)
-    placeholders = ','.join('?' for _ in cols)
-    updates = ','.join(
-        (
-            'raw_json=COALESCE(excluded.raw_json,snapshots.raw_json)'
-            if col == 'raw_json' else f'{col}=excluded.{col}'
-        )
-        for col in cols if col != 'source_ts'
-    )
 
     with db() as conn:
         for source in snapshots:
@@ -1952,7 +1944,11 @@ def restore_raw_backup_document(document):
                 skipped += 1
                 continue
 
-            row = {column: source.get(column) for column in cols}
+            # Old backup formats do not contain the 0.1.15 fuel/GPS columns.
+            # Include only keys actually present so missing fields cannot
+            # overwrite already stored values with NULL on conflict.
+            present_cols = [column for column in cols if column in source]
+            row = {column: source[column] for column in present_cols}
             source_ts = row.get('source_ts')
             if not isinstance(source_ts, str) or iso_to_dt(source_ts) is None:
                 skipped += 1
@@ -1967,10 +1963,20 @@ def restore_raw_backup_document(document):
                 'SELECT 1 FROM snapshots WHERE source_ts=?', (source_ts,)
             ).fetchone() is not None
 
+            placeholders = ','.join('?' for _ in present_cols)
+            updates = ','.join(
+                ('raw_json=COALESCE(excluded.raw_json,snapshots.raw_json)'
+                 if column == 'raw_json' else f'{column}=excluded.{column}')
+                for column in present_cols if column != 'source_ts'
+            )
+            conflict_action = (
+                f'ON CONFLICT(source_ts) DO UPDATE SET {updates}'
+                if updates else 'ON CONFLICT(source_ts) DO NOTHING'
+            )
             conn.execute(
-                f"INSERT INTO snapshots ({','.join(cols)}) VALUES ({placeholders}) "
-                f"ON CONFLICT(source_ts) DO UPDATE SET {updates}",
-                [row[column] for column in cols],
+                f"INSERT INTO snapshots ({','.join(present_cols)}) VALUES ({placeholders}) "
+                + conflict_action,
+                [row[column] for column in present_cols],
             )
             if existed:
                 updated += 1
