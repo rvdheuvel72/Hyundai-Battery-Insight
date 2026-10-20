@@ -93,9 +93,18 @@ def main():
                        'gps_points': [{'source_ts': '2026-10-20T16:00:00+00:00',
                                        'latitude': 0, 'longitude': 0,
                                        'source_kind': 'ha_tracker'}]}
+        zero_backup['snapshots'] = [{'source_ts': '2026-10-20T16:01:00+00:00',
+                                     'geo_source_ts': '2026-10-20T16:01:00+00:00',
+                                     'geo_latitude': 0, 'geo_longitude': 0,
+                                     'geo_speed': 0, 'geo_heading': 0}]
         zero_result = m.restore_raw_backup_document(zero_backup)
         assert zero_result['gps_skipped'] == 1
         assert zero_result['gps_inserted'] == 0
+        with m.db() as conn:
+            zero_row = conn.execute(
+                'SELECT geo_source_ts, geo_latitude, geo_longitude FROM snapshots WHERE source_ts=?',
+                ('2026-10-20T16:01:00+00:00',)).fetchone()
+        assert zero_row is not None and all(value is None for value in zero_row)
         backup = m.raw_backup_document()
         assert backup["gps_points"][0]["source_kind"] == "raw_ccs2"
         assert "geo_source_ts" in backup["snapshots"][0]
