@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.16
+
+- Treats odometer increases as **movement measurement windows**, not proof of one individual drive. Multiple real drives may occur between Hyundai cloud and Home Assistant polls.
+- Shows that the actual number of drives and exact driving times are unknown when individual vehicle updates are unavailable, while preserving measured distance and evidence.
+- Updates dashboard, outing summaries and exports to distinguish inferred movement windows from confirmed trips (`movement_window` event type and `trip_count_known: false`).
+- Adds regression coverage for the new semantics and a CI check requiring an add-on version increase for subsequent runtime or operational configuration changes.
+
 ## 0.1.15
 
 - Adds a configurable `gps_entity`, defaulting to `device_tracker.tucson_location_2`, reading only existing Home Assistant location states/history without triggering Hyundai refreshes.
