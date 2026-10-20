@@ -1,5 +1,5 @@
 name: Hyundai Battery Insight
-version: "0.1.14"
+version: "0.1.15"
 slug: hyundai_battery_insight
 description: >-
   Correlates Hyundai/Kia CCS2 12V SoC, HV Battery Level, odometer and fresh vehicle
@@ -22,6 +22,7 @@ options:
   aux_soc_entity: auto
   hv_battery_entity: auto
   odometer_entity: auto
+  gps_entity: device_tracker.tucson_location_2
   lookback_days: 120
   poll_seconds: 300
   import_on_start: true
@@ -30,6 +31,7 @@ schema:
   aux_soc_entity: str
   hv_battery_entity: str
   odometer_entity: str
+  gps_entity: str
   lookback_days: int(7,365)
   poll_seconds: int(60,3600)
   import_on_start: bool
