@@ -522,7 +522,7 @@ jobs:
           intervals = [
               module.classify(a, b) for a, b in zip(points, points[1:])
           ]
-          assert intervals[0]["event_type"] == "ride"
+          assert intervals[0]["event_type"] == "movement_window"
           assert intervals[1]["event_type"] == "decline_minor_movement"
           assert intervals[1]["aux_delta"] == -22
           assert intervals[1]["odo_delta"] == 0.2
