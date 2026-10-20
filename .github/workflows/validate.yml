@@ -28,7 +28,6 @@ jobs:
           import os
           import subprocess
           from pathlib import Path
-          import re
 
           base = os.environ['BASE_SHA']
           changed = subprocess.check_output(
@@ -42,10 +41,10 @@ jobs:
               )
               new_text = Path('hyundai_battery_insight/config.yaml').read_text()
               def version(content):
-                  match = re.search(r'^version:\\s*[\"\']?(\\d+\\.\\d+\\.\\d+)', content, re.M)
-                  if not match:
-                      raise SystemExit('Cannot determine add-on version')
-                  return match.group(1)
+                  for line in content.splitlines():
+                      if line.startswith('version:'):
+                          return line.split(':', 1)[1].strip().strip('"').strip("'")
+                  raise SystemExit('Cannot determine add-on version')
               old, new = version(old_text), version(new_text)
               def parts(v):
                   return tuple(map(int, str(v).split('.')))
