@@ -491,6 +491,81 @@ jobs:
           print("explicit timeline ranges: OK")
           PY
 
+      - name: Test interval peak uncertainty and small movements
+        run: |
+          python - <<'PY'
+          import csv
+          import datetime as dt
+          import importlib.util
+          import io
+          from pathlib import Path
+
+          path = Path("hyundai_battery_insight/app/server.py")
+          spec = importlib.util.spec_from_file_location("hbi_intervals_test", path)
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+
+          def row(ts, aux, hv, km):
+              return {
+                  "source_ts": ts, "aux_soc": aux, "ev_soc": hv,
+                  "odometer": km, "source_kind": "raw",
+                  "charging_remain_time": None,
+              }
+
+          points = [
+              row("2026-10-19T16:50:00+00:00", 70, 100, 1000),
+              row("2026-10-19T17:14:00+00:00", 85, 100, 1002),
+              row("2026-10-20T09:51:00+00:00", 63, 99, 1002.2),
+          ]
+          intervals = [
+              module.classify(a, b) for a, b in zip(points, points[1:])
+          ]
+          assert intervals[0]["event_type"] == "ride"
+          assert intervals[1]["event_type"] == "decline_minor_movement"
+          assert intervals[1]["aux_delta"] == -22
+          assert intervals[1]["odo_delta"] == 0.2
+          assert "piek" in intervals[1]["unknown"]
+          # 0.2 km must not reset the 'since last trip' baseline.
+          summary = module.since_last_trip_context(points, intervals)
+          assert summary["highest_recorded_aux_soc"] == 85
+          assert summary["aux_end"] == 63
+          assert summary["aux_delta"] == -22
+          assert summary["actual_peak_aux_soc_known"] is False
+
+          exported = module.interval_export_rows(points, intervals)
+          assert len(exported) == 2
+          assert exported[1]["aux_soc_start"] == 85
+          assert exported[1]["aux_soc_end"] == 63
+          assert exported[1]["real_peak_12v_soc"] == "unknown"
+          assert exported[1]["source_quality"] == "raw"
+
+          start = dt.datetime(2026, 10, 19, tzinfo=dt.timezone.utc)
+          end = dt.datetime(2026, 10, 21, tzinfo=dt.timezone.utc)
+          doc = module.interval_export_document(points, intervals, start, end)
+          assert doc["range"]["start"] == start.isoformat()
+          assert doc["interval_count"] == 2
+          assert doc["intervals"] == exported
+          output = io.StringIO()
+          writer = csv.DictWriter(
+              output, fieldnames=module.INTERVAL_EXPORT_COLUMNS
+          )
+          writer.writeheader()
+          writer.writerows(exported)
+          contents = list(csv.DictReader(io.StringIO(output.getvalue())))
+          assert len(contents) == 2
+          assert contents[1]["aux_delta_pp"] == "-22"
+          assert contents[1]["real_peak_12v_soc"] == "unknown"
+
+          # A 12V decline must not be masked by a simultaneous HV increase.
+          concurrent = module.classify(
+              row("2026-10-18T12:00:00+00:00", 65, 45, 1002),
+              row("2026-10-19T12:00:00+00:00", 55, 46, 1002),
+          )
+          assert concurrent["event_type"] == "decline_no_ride"
+          assert not module.interval_export_rows([], [])
+          print("interval analysis and unknown peak exports: OK")
+          PY
+
       - name: Check UI day selector
         run: |
           python - <<'PY'
@@ -508,6 +583,11 @@ jobs:
           assert 'id="prevRange"' in html
           assert 'id="todayRange"' in html
           assert 'id="nextRange"' in html
+          assert 'id="intervalCsv"' in html
+          assert 'id="intervalJson"' in html
+          assert 'api/intervals.csv?' in html
+          assert 'api/intervals.json?' in html
+          assert "'stroke-dasharray':'4 5'" in html
           assert 'id="fromDate"' in html
           assert 'id="toDate"' in html
           assert 'id="applyRange"' in html
