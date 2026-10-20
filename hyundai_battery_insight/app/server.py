@@ -652,7 +652,8 @@ def valid_position(state):
         return None
     attrs = state.get('attributes') or {}
     lat, lon = num(attrs.get('latitude')), num(attrs.get('longitude'))
-    if lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+    if (lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180)
+            or (lat == 0 and lon == 0)):
         return None
     stamp = parse_vehicle_ts(None, state.get('last_updated') or state.get('last_changed'))
     if not stamp:
