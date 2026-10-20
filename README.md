@@ -184,6 +184,14 @@ Hyundai Battery Insight is released under the [MIT License](LICENSE). You are fr
 
 For the in-app documentation and version history, see [DOCS.md](hyundai_battery_insight/DOCS.md) and [CHANGELOG.md](hyundai_battery_insight/CHANGELOG.md).
 
+## 0.1.14
+
+- Adds **Rittenanalyse** grouping multiple successive Bluelink/HA odometer measurements into one *inferred* journey while keeping each sample and SoC reading intact.
+- Fixes the two Codex P2 findings from PR #1: cumulative drives with individual increments <=1 km and missing minor-movement recoveries from the summary.
+- Uses the final sample and cumulative distance of the latest grouped journey for standstill analysis.
+- Includes journey metadata in interval exports and a journey summary array in JSON.
+- Adds a CI review gate that waits for a completed clean Codex review of the current PR head; a required branch protection check is still necessary to enforce it against manual merges.
+
 ## 0.1.13
 
 - Distinguishes net SoC changes between snapshots from an unknown real peak after charging, including an explicit **highest recorded 12V SoC** indicator.
