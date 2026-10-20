@@ -16,6 +16,39 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require add-on version bump for runtime changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+          import yaml
+
+          base = os.environ['BASE_SHA']
+          changed = subprocess.check_output(
+              ['git', 'diff', '--name-only', base, 'HEAD'], text=True
+          ).splitlines()
+          runtime = [p for p in changed if p.startswith('hyundai_battery_insight/')
+                     and p != 'hyundai_battery_insight/config.yaml']
+          if runtime:
+              old = yaml.safe_load(subprocess.check_output(
+                  ['git', 'show', f'{base}:hyundai_battery_insight/config.yaml'], text=True
+              ))['version']
+              new = yaml.safe_load(Path('hyundai_battery_insight/config.yaml').read_text())['version']
+              def parts(v):
+                  return tuple(map(int, str(v).split('.')))
+              if parts(new) <= parts(old):
+                  raise SystemExit(f'Runtime files changed but add-on version not bumped: {old} -> {new}. Files: {runtime}')
+              print(f'Add-on version bumped: {old} -> {new}')
+          else:
+              print('No runtime change requires an add-on version bump')
+          PY
 
       - name: Set up Python
         uses: actions/setup-python@v5
