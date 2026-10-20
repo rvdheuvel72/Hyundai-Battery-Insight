@@ -37,8 +37,11 @@ RAW_BACKUP_COLUMNS = (
     'battery_pre_warning', 'power_state_class_c', 'sleep_mode', 'driving_ready',
     'accessory', 'ignition1', 'ignition3', 'connector_fastening',
     'charging_remain_time', 'ev_charging', 'raw_json',
+    'fuel_level', 'geo_source_ts', 'geo_latitude', 'geo_longitude',
+    'geo_speed', 'geo_speed_unit', 'geo_heading',
 )
-GPS_BACKUP_COLUMNS = ('source_ts', 'latitude', 'longitude', 'source_kind')
+GPS_BACKUP_COLUMNS = ('source_ts', 'latitude', 'longitude', 'source_kind',
+                      'speed', 'speed_unit', 'heading')
 HISTORY_BACKUP_COLUMNS = (
     'source_ts', 'aux_soc', 'ev_soc', 'odometer',
     'aux_source_ts', 'ev_source_ts', 'odometer_source_ts', 'imported_ts',
@@ -132,9 +135,28 @@ def init_db():
             connector_fastening INTEGER,
             charging_remain_time REAL,
             ev_charging TEXT,
-            raw_json TEXT
+            raw_json TEXT,
+            fuel_level REAL,
+            geo_source_ts TEXT,
+            geo_latitude REAL,
+            geo_longitude REAL,
+            geo_speed REAL,
+            geo_speed_unit INTEGER,
+            geo_heading REAL
         )
         ''')
+        # Existing installations must migrate without erasing original snapshots.
+        snapshot_columns = {
+            r['name'] for r in c.execute('PRAGMA table_info(snapshots)').fetchall()
+        }
+        for key, type_name in (
+            ('fuel_level', 'REAL'), ('geo_source_ts', 'TEXT'),
+            ('geo_latitude', 'REAL'), ('geo_longitude', 'REAL'),
+            ('geo_speed', 'REAL'), ('geo_speed_unit', 'INTEGER'),
+            ('geo_heading', 'REAL')
+        ):
+            if key not in snapshot_columns:
+                c.execute(f'ALTER TABLE snapshots ADD COLUMN {key} {type_name}')
         c.execute('CREATE INDEX IF NOT EXISTS idx_snapshots_source_ts ON snapshots(source_ts)')
         c.execute('''
         CREATE TABLE IF NOT EXISTS ha_history_points (
@@ -169,9 +191,16 @@ def init_db():
             source_ts TEXT PRIMARY KEY,
             latitude REAL NOT NULL,
             longitude REAL NOT NULL,
-            source_kind TEXT NOT NULL
+            source_kind TEXT NOT NULL,
+            speed REAL,
+            speed_unit INTEGER,
+            heading REAL
         )
         ''')
+        gps_columns = {r['name'] for r in c.execute('PRAGMA table_info(gps_points)').fetchall()}
+        for key, type_name in (('speed', 'REAL'), ('speed_unit', 'INTEGER'), ('heading', 'REAL')):
+            if key not in gps_columns:
+                c.execute(f'ALTER TABLE gps_points ADD COLUMN {key} {type_name}')
         c.commit()
 
 
@@ -481,6 +510,16 @@ def extract_snapshot(state_obj):
     vin = find_vin(state_obj) or find_vin(vd)
     protected_raw = protect_raw_payload(vd, vin)
 
+    loc = vd.get('Location') or {}
+    geo = loc.get('GeoCoord') or {}
+    lat, lon = num(geo.get('Latitude')), num(geo.get('Longitude'))
+    if (lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180)
+            or (lat == 0 and lon == 0)):
+        lat = lon = None
+    geo_source_ts = parse_vehicle_ts(loc.get('Date'))
+    if not geo_source_ts:
+        lat = lon = None
+
     return {
         'source_ts': source_ts,
         'received_ts': parse_vehicle_ts(None, state_obj.get('last_updated')),
@@ -489,6 +528,12 @@ def extract_snapshot(state_obj):
         'ev_soh': num(get_path(bm, 'SoH', 'Ratio')),
         'odometer': num(drivetrain.get('Odometer')),
         'ev_range': num(get_path(fuel, 'DTE', 'EV')),
+        'fuel_level': num(fuel.get('FuelLevel')),
+        'geo_source_ts': geo_source_ts,
+        'geo_latitude': lat, 'geo_longitude': lon,
+        'geo_speed': num(get_path(loc, 'Speed', 'Value')),
+        'geo_speed_unit': intval(get_path(loc, 'Speed', 'Unit')),
+        'geo_heading': num(loc.get('Heading')),
         'warning_level': num(get_path(battery, 'Charging', 'WarningLevel')),
         'sensor_reliability': intval(battery.get('SensorReliability')),
         'aux_fail_warning': intval(get_path(battery, 'Auxiliary', 'FailWarning')),
@@ -527,7 +572,19 @@ def upsert_snapshot(s):
             [s[c] for c in cols],
         )
         c.commit()
-        return before is None
+    # The GPS reading has its OWN timestamp. Never stamp old GPS data with
+    # the current vehicle or Home Assistant update time.
+    if s.get('geo_source_ts') and s.get('geo_latitude') is not None and s.get('geo_longitude') is not None:
+        upsert_gps_position({
+            'source_ts': s['geo_source_ts'],
+            'latitude': s['geo_latitude'],
+            'longitude': s['geo_longitude'],
+            'source_kind': 'raw_ccs2',
+            'speed': s.get('geo_speed'),
+            'speed_unit': s.get('geo_speed_unit'),
+            'heading': s.get('geo_heading'),
+        })
+    return before is None
 
 
 def upsert_history_point(p):
