@@ -1224,6 +1224,131 @@ def _history_rows(days):
     return _history_rows_range(end - dt.timedelta(days=days), end)
 
 
+
+# A journey is a group of adjacent odometer-increasing intervals. Measurements
+# are NEVER merged or discarded: each retains its original timestamps/deltas.
+# A >1 km cumulative movement is a heuristic for a journey, not a verified
+# ignition cycle. Time gaps >45 min break grouping, including sleeping gaps.
+JOURNEY_MIN_KM = 1.0
+JOURNEY_MAX_SAMPLE_GAP_HOURS = 0.75
+
+
+def group_journeys(rows, intervals):
+    """Annotate individual intervals with inferred journey membership."""
+    groups = []
+    active = []
+
+    def finish():
+        nonlocal active
+        if active:
+            groups.append(active)
+            active = []
+
+    for i, interval in enumerate(intervals):
+        dist = interval.get('odo_delta')
+        if dist is None or dist <= 0.05:
+            finish()
+            continue
+        hours = interval.get('hours')
+        if hours is None or hours <= 0:
+            finish()
+            continue
+        if hours > JOURNEY_MAX_SAMPLE_GAP_HOURS:
+            finish()
+            # A large odometer jump across a sleep gap may indicate a trip,
+            # but it cannot be joined to later short-interval driving samples.
+            if dist > JOURNEY_MIN_KM:
+                groups.append([i])
+            continue
+        active.append(i)
+    finish()
+
+    journeys = []
+    for group in groups:
+        distance = round(sum(intervals[i]['odo_delta'] for i in group), 3)
+        if distance <= JOURNEY_MIN_KM:
+            continue
+        begin, end = group[0], group[-1]
+        first, last = rows[begin], rows[end + 1]
+        jid = 'journey-' + first['source_ts']
+        source_types = {intervals[i].get('source_quality') for i in group}
+        if source_types == {'raw'}:
+            evidence = 'raw'
+        elif 'ha_statistics' in source_types:
+            evidence = 'ha_statistics'
+        else:
+            evidence = 'ha_history'
+        journey = {
+            'journey_id': jid,
+            'from': first['source_ts'], 'to': last['source_ts'],
+            'distance_km': distance,
+            'interval_count': len(group),
+            'measurement_count': len(group) + 1,
+            'source_quality': evidence,
+            'start_odometer': first.get('odometer'),
+            'end_odometer': last.get('odometer'),
+            'aux_soc_start': first.get('aux_soc'),
+            'aux_soc_end': last.get('aux_soc'),
+            'hv_battery_level_start': first.get('ev_soc'),
+            'hv_battery_level_end': last.get('ev_soc'),
+            'inference': (
+                'Opeenvolgende odometertoenames zijn als vermoedelijke rit '
+                'gegroepeerd; dit bewijst geen ononderbroken rit of exact '
+                'start-/eindtijdstip. Meetpunten blijven apart beschikbaar.'
+            ),
+        }
+        journeys.append(journey)
+        for number, idx in enumerate(group, start=1):
+            interval = intervals[idx]
+            old_type = interval['event_type']
+            interval['event_type'] = 'ride'
+            interval['label'] = 'Rit — meetinterval {}/{}'.format(number, len(group))
+            interval['journey_id'] = jid
+            interval['journey_interval_index'] = number
+            interval['journey_interval_count'] = len(group)
+            interval['journey_distance_km'] = distance
+            interval['inference'] += (
+                ' Dit meetinterval hoort bij een vermoedelijke rit van '
+                f'{distance:g} km, opgebouwd uit {len(group)} '
+                'opeenvolgende meetintervallen; geen afzonderlijke rit.'
+            )
+            if old_type in ('decline_minor_movement', 'decline_no_ride'):
+                interval['inference'] += (
+                    ' De gemeten 12V-daling blijft ook binnen deze rit zichtbaar.'
+                )
+            interval['unknown'] += (
+                ' De groepering gebruikt afstand en meetafstand in tijd; '
+                'de daadwerkelijke ritgrenzen zijn niet rechtstreeks gemeten.'
+            )
+    return journeys
+
+
+def journeys_from_intervals(intervals):
+    """Stable public journey summaries from previously annotated intervals."""
+    summaries = []
+    seen = set()
+    for interval in intervals:
+        jid = interval.get('journey_id')
+        if not jid or jid in seen:
+            continue
+        seen.add(jid)
+        peers = [x for x in intervals if x.get('journey_id') == jid]
+        summaries.append({
+            'journey_id': jid,
+            'from': peers[0]['from'], 'to': peers[-1]['to'],
+            'distance_km': peers[0]['journey_distance_km'],
+            'interval_count': len(peers),
+            'measurement_count': len(peers) + 1,
+            'source_quality': (
+                'ha_statistics' if any(x['source_quality'] == 'ha_statistics' for x in peers)
+                else 'ha_history' if any(x['source_quality'] != 'raw' for x in peers)
+                else 'raw'
+            ),
+            'inference': 'Vermoedelijke rit op basis van cumulatieve kilometerstand; begin/eindtijden zijn meetgrenzen, geen bewezen contactmomenten.',
+        })
+    return summaries
+
+
 def query_timeline_range(start, end):
     start, end = _validated_range(start, end)
     raw = _raw_rows_range(start, end)
@@ -1268,6 +1393,7 @@ def query_timeline_range(start, end):
         classify(combined[i - 1], combined[i])
         for i in range(1, len(combined))
     ]
+    group_journeys(combined, intervals)
     return combined, intervals, raw
 
 
@@ -1314,8 +1440,8 @@ def since_last_trip_context(rows, intervals):
     odo_d = delta(baseline.get('odometer'), latest.get('odometer'))
     rate = round(aux_d * 24.0 / hours, 2) if aux_d is not None and hours and hours > 0 else None
     post_intervals = intervals[last_ride_i + 1:]
-    recoveries = sum(1 for x in post_intervals if x.get('event_type') == 'recovery_no_ride')
-    declines = sum(1 for x in post_intervals if x.get('event_type') == 'decline_no_ride')
+    recoveries = sum(1 for x in post_intervals if x.get('event_type') in ('recovery_no_ride', 'recovery_minor_movement'))
+    declines = sum(1 for x in post_intervals if x.get('event_type') in ('decline_no_ride', 'decline_minor_movement'))
     point_count = len(rows) - baseline_index
     last_ride = intervals[last_ride_i]
 
@@ -1362,7 +1488,9 @@ def since_last_trip_context(rows, intervals):
         'actual_peak_aux_soc_known': False,
         'hv_start': baseline.get('ev_soc'), 'hv_end': latest.get('ev_soc'), 'hv_delta': ev_d,
         'odo_start': baseline.get('odometer'), 'odo_end': latest.get('odometer'), 'odo_delta': odo_d,
-        'last_trip_distance': last_ride.get('odo_delta'),
+        'last_trip_distance': last_ride.get('journey_distance_km', last_ride.get('odo_delta')),
+        'last_journey_id': last_ride.get('journey_id'),
+        'last_journey_measurements': last_ride.get('journey_interval_count', 1) + 1,
         'data_points': point_count,
         'recovery_events': recoveries, 'decline_events': declines,
         'uses_history_correlation': uses_history,
@@ -1581,7 +1709,9 @@ INTERVAL_EXPORT_COLUMNS = (
     'aux_soc_start', 'aux_soc_end', 'aux_delta_pp',
     'hv_battery_level_start', 'hv_battery_level_end', 'hv_battery_level_delta_pp',
     'odometer_start', 'odometer_end', 'odometer_delta_km',
-    'netto_pp_per_24h', 'real_peak_12v_soc', 'facts', 'inference', 'unknown',
+    'netto_pp_per_24h', 'real_peak_12v_soc', 'journey_id',
+    'journey_interval_index', 'journey_interval_count', 'journey_distance_km',
+    'facts', 'inference', 'unknown',
 )
 INTERVAL_EXPORT_NOTE = (
     'Waarden zijn gemeten endpoints, geen continu verloop. Een ongeregistreerde '
@@ -1615,6 +1745,10 @@ def interval_export_rows(rows, intervals):
             'odometer_delta_km': interval.get('odo_delta'),
             'netto_pp_per_24h': interval.get('aux_rate_24h'),
             'real_peak_12v_soc': 'unknown',
+            'journey_id': interval.get('journey_id'),
+            'journey_interval_index': interval.get('journey_interval_index'),
+            'journey_interval_count': interval.get('journey_interval_count'),
+            'journey_distance_km': interval.get('journey_distance_km'),
             'facts': interval.get('facts'),
             'inference': interval.get('inference'),
             'unknown': interval.get('unknown'),
@@ -1628,6 +1762,7 @@ def interval_export_document(rows, intervals, range_start, range_end):
         'range': {'start': range_start.isoformat(), 'end': range_end.isoformat()},
         'interpretation_note': INTERVAL_EXPORT_NOTE,
         'interval_count': len(intervals),
+        'journeys': journeys_from_intervals(intervals),
         'intervals': interval_export_rows(rows, intervals),
     }
 
@@ -1705,6 +1840,7 @@ class Handler(BaseHTTPRequestHandler):
                 'since_last_trip': since_last_trip_context(rows, intervals),
                 'snapshots': [public_snapshot(r) for r in rows],
                 'intervals': intervals,
+                'journeys': journeys_from_intervals(intervals),
                 'coverage': {
                     'raw_points': sum(1 for r in rows if r.get('source_kind') == 'raw'),
                     'ha_history_points': sum(1 for r in rows if r.get('source_kind') == 'ha_history'),
@@ -1807,6 +1943,7 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 'snapshots': [public_snapshot(r) for r in rows],
                 'intervals': intervals,
+                'journeys': journeys_from_intervals(intervals),
                 'since_last_trip': since_last_trip_context(rows, intervals),
                 'resolved_entities': RESOLVED_ENTITIES,
             })

@@ -46,6 +46,16 @@ The rebuild result reports the available detailed and long-term source ranges fo
 
 These correlated values are useful for trends, but they are not treated as equivalent to one raw vehicle snapshot.
 
+### Journey grouping and review gating (0.1.14)
+
+**Rittenanalyse** groups adjacent, odometer-increasing intervals when the total distance exceeds 1 km, even if each increment is <=1 km. This is an inference, not a recorded ignition or trip start/stop event. Every underlying sample remains separately available in the graph and interval analysis and the interval exports now include journey ID, total distance and sample position.
+
+Groups break on intervals without significant odometer increases and on intervals longer than 45 minutes. A large odometer jump over a gap remains a single uncertain journey interval rather than being connected to later samples. An isolated 0.2 km parking/charging movement remains a minor movement.
+
+The **Sinds laatste geregistreerde rit** baseline uses the last sample of the grouped journey and shows cumulative distance rather than only the final segment's distance. Minor-movement recovery events are counted in the summary without labelling them as full rides.
+
+The pull-request CI workflow includes an additional fail-closed **Codex review complete and clean** job. It waits for the review summary for the exact current PR commit, rejects unresolved findings reported by Codex's current review state (not stale inline comments from already-resolved discussions), and fails when Codex does not complete in time. To make this job an enforced pre-merge requirement for everyone, configure GitHub branch protection/rulesets to require the job alongside `validate`. Merge only after both checks pass; a normal `validate` success is not a substitute for Codex review.
+
 ### Measured SoC endpoints and missing peaks (0.1.13)
 
 A 12V SoC recovery after charging may continue while the vehicle is asleep; the app might not receive the true maximum. **Highest recorded SoC** is calculated only from available measurements since the last detected trip, not the unknown real peak.

@@ -8,6 +8,8 @@ on:
 
 permissions:
   contents: read
+  issues: read
+  pull-requests: read
 
 jobs:
   validate:
@@ -566,6 +568,86 @@ jobs:
           print("interval analysis and unknown peak exports: OK")
           PY
 
+      - name: Test grouped journeys and P2 regressions
+        run: |
+          python - <<'PY'
+          import datetime as dt
+          import importlib.util
+          from pathlib import Path
+
+          spec = importlib.util.spec_from_file_location(
+              "hbi_journey_test", Path("hyundai_battery_insight/app/server.py")
+          )
+          m = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(m)
+
+          def point(hhmm, odo, soc):
+              return {
+                  "source_ts": "2026-10-20T" + hhmm + ":00+00:00",
+                  "odometer": odo, "aux_soc": soc, "ev_soc": 80,
+                  "source_kind": "raw", "charging_remain_time": None
+              }
+          samples = [
+              point("09:00", 2000.0, 65),
+              point("09:10", 2000.6, 67),
+              point("09:20", 2001.4, 69),
+              point("09:30", 2002.2, 71),
+              point("10:10", 2002.2, 65),
+              point("10:20", 2002.4, 70),
+          ]
+          intervals = [
+              m.classify(a, b) for a, b in zip(samples, samples[1:])
+          ]
+          journeys = m.group_journeys(samples, intervals)
+          assert len(journeys) == 1
+          assert journeys[0]["distance_km"] == 2.2
+          assert journeys[0]["measurement_count"] == 4
+          assert [it["event_type"] for it in intervals[:3]] == ["ride"] * 3
+          assert [it["journey_interval_index"] for it in intervals[:3]] == [1, 2, 3]
+          assert len({it["journey_id"] for it in intervals[:3]}) == 1
+          assert intervals[4]["event_type"] == "recovery_minor_movement"
+          assert "journey_id" not in intervals[4]
+          summary = m.since_last_trip_context(samples, intervals)
+          assert summary["available"] is True
+          assert summary["last_trip_distance"] == 2.2
+          assert summary["baseline_ts"] == samples[3]["source_ts"]
+          assert summary["recovery_events"] == 1
+
+          exported = m.interval_export_rows(samples, intervals)
+          assert len(exported) == len(intervals)
+          assert len([x for x in exported if x["journey_id"]]) == 3
+          assert exported[4]["journey_id"] is None
+          doc = m.interval_export_document(
+              samples, intervals,
+              dt.datetime(2026, 10, 20, tzinfo=dt.timezone.utc),
+              dt.datetime(2026, 10, 21, tzinfo=dt.timezone.utc),
+          )
+          assert len(doc["journeys"]) == 1
+
+          # An isolated parking repositioning does not become a ride.
+          short = [
+              point("11:00", 3000, 85),
+              point("11:10", 3000.2, 63),
+          ]
+          short_intervals = [m.classify(*short)]
+          assert not m.group_journeys(short, short_intervals)
+          assert short_intervals[0]["event_type"] == "decline_minor_movement"
+
+          # A long gap splits journeys rather than fabricating continuity.
+          samples2 = samples[:4] + [point("12:30", 2010, 68)]
+          ints2 = [
+              m.classify(a, b) for a, b in zip(samples2, samples2[1:])
+          ]
+          js2 = m.group_journeys(samples2, ints2)
+          assert len(js2) == 2
+          assert js2[0]["measurement_count"] == 4
+          assert js2[1]["measurement_count"] == 2
+          print("grouped journeys + P2 regressions: OK")
+          PY
+
+      - name: Test Codex review gate (offline)
+        run: python scripts/codex_review_gate.py --self-test
+
       - name: Check UI day selector
         run: |
           python - <<'PY'
@@ -585,6 +667,8 @@ jobs:
           assert 'id="nextRange"' in html
           assert 'id="intervalCsv"' in html
           assert 'id="intervalJson"' in html
+          assert 'id="journeys"' in html
+          assert 'renderJourneys(DATA.journeys||[])' in html
           assert 'api/intervals.csv?' in html
           assert 'api/intervals.json?' in html
           assert "'stroke-dasharray':'4 5'" in html
@@ -603,3 +687,18 @@ jobs:
           test -f hyundai_battery_insight/README.md
           test -f hyundai_battery_insight/DOCS.md
           test -f hyundai_battery_insight/CHANGELOG.md
+
+  codex_review:
+    name: Codex review complete and clean
+    if: github.event_name == 'pull_request'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wait for Codex review of the exact PR head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python scripts/codex_review_gate.py
