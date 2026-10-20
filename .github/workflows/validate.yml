@@ -28,7 +28,7 @@ jobs:
           import os
           import subprocess
           from pathlib import Path
-          import yaml
+          import re
 
           base = os.environ['BASE_SHA']
           changed = subprocess.check_output(
@@ -37,10 +37,16 @@ jobs:
           runtime = [p for p in changed if p.startswith('hyundai_battery_insight/')
                      and p != 'hyundai_battery_insight/config.yaml']
           if runtime:
-              old = yaml.safe_load(subprocess.check_output(
+              old_text = subprocess.check_output(
                   ['git', 'show', f'{base}:hyundai_battery_insight/config.yaml'], text=True
-              ))['version']
-              new = yaml.safe_load(Path('hyundai_battery_insight/config.yaml').read_text())['version']
+              )
+              new_text = Path('hyundai_battery_insight/config.yaml').read_text()
+              def version(content):
+                  match = re.search(r'^version:\\s*[\"\']?(\\d+\\.\\d+\\.\\d+)', content, re.M)
+                  if not match:
+                      raise SystemExit('Cannot determine add-on version')
+                  return match.group(1)
+              old, new = version(old_text), version(new_text)
               def parts(v):
                   return tuple(map(int, str(v).split('.')))
               if parts(new) <= parts(old):
