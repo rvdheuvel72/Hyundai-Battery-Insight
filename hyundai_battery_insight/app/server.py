@@ -2058,6 +2058,13 @@ def public_snapshot(r):
         'aux_soc': r.get('aux_soc'),
         'hv_battery_level': r.get('ev_soc'),
         'odometer': r.get('odometer'),
+        'fuel_level': r.get('fuel_level'),
+        'geo_source_ts': r.get('geo_source_ts'),
+        'gps_fix_age_hours': (
+            round((iso_to_dt(r['source_ts']) - iso_to_dt(r['geo_source_ts'])).total_seconds()/3600, 2)
+            if r.get('geo_source_ts') and iso_to_dt(r.get('source_ts'))
+            and iso_to_dt(r.get('geo_source_ts')) else None
+        ),
         'warning_level': r.get('warning_level'),
         'sleep_mode': r.get('sleep_mode'),
         'sensor_reliability': r.get('sensor_reliability'),
@@ -2077,6 +2084,7 @@ INTERVAL_EXPORT_COLUMNS = (
     'from', 'to', 'hours', 'source_quality', 'event_type', 'label',
     'aux_soc_start', 'aux_soc_end', 'aux_delta_pp',
     'hv_battery_level_start', 'hv_battery_level_end', 'hv_battery_level_delta_pp',
+    'fuel_level_start', 'fuel_level_end', 'fuel_level_delta',
     'odometer_start', 'odometer_end', 'odometer_delta_km',
     'netto_pp_per_24h', 'real_peak_12v_soc', 'journey_id',
     'journey_interval_index', 'journey_interval_count', 'journey_distance_km',
@@ -2111,6 +2119,13 @@ def interval_export_rows(rows, intervals):
             'hv_battery_level_start': start.get('ev_soc'),
             'hv_battery_level_end': end.get('ev_soc'),
             'hv_battery_level_delta_pp': interval.get('hv_battery_level_delta'),
+            'fuel_level_start': start.get('fuel_level'),
+            'fuel_level_end': end.get('fuel_level'),
+            'fuel_level_delta': (
+                round(end['fuel_level']-start['fuel_level'], 3)
+                if start.get('fuel_level') is not None and end.get('fuel_level') is not None
+                else None
+            ),
             'odometer_start': start.get('odometer'),
             'odometer_end': end.get('odometer'),
             'odometer_delta_km': interval.get('odo_delta'),
@@ -2291,6 +2306,7 @@ class Handler(BaseHTTPRequestHandler):
             output = io.StringIO()
             fields = [
                 'source_ts', 'source_kind', 'aux_soc', 'hv_battery_level', 'odometer',
+                'fuel_level', 'geo_source_ts', 'gps_fix_age_hours',
                 'warning_level', 'sleep_mode', 'sensor_reliability', 'aux_fail_warning',
                 'battery_pre_warning', 'aux_source_ts', 'hv_source_ts', 'odometer_source_ts',
                 'charging_remaining_minutes'
