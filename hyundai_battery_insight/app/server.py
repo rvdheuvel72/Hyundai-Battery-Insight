@@ -2244,7 +2244,8 @@ def gouda_daily_weather(start, end):
     """Open-Meteo historical IFS plus recent forecast/past-days; no vehicle calls."""
     today = dt.datetime.now(ZoneInfo('Europe/Amsterdam')).date()
     first = start.astimezone(ZoneInfo('Europe/Amsterdam')).date()
-    last = min(end.astimezone(ZoneInfo('Europe/Amsterdam')).date(), today)
+    last = min((end - dt.timedelta(microseconds=1)).astimezone(
+        ZoneInfo('Europe/Amsterdam')).date(), today)
     if first > last:
         return {'days': [], 'status': 'unavailable'}
     key = (first.isoformat(), last.isoformat())
