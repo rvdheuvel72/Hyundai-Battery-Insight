@@ -2227,15 +2227,24 @@ WEATHER_LOCK = threading.Lock()
 
 
 def selected_distance(rows, intervals):
-    """Sum observed positive odometer deltas, never infer unobserved boundary trips."""
-    distance = sum(max(0.0, float(i['odo_delta'])) for i in intervals
-                   if i.get('odo_delta') is not None)
-    valid = [r for r in rows if r.get('odometer') is not None]
+    """Observed positive changes between successive *valid* in-range readings.
+
+    Missing odometer samples do not break the measurement chain; no distance
+    is inferred outside the selected range or from a single valid reading.
+    """
+    valid = [float(r['odometer']) for r in rows
+             if r.get('odometer') is not None]
+    if len(valid) < 2:
+        distance = None
+    else:
+        distance = round(sum(max(0.0, right - left)
+                             for left, right in zip(valid, valid[1:])), 2)
     return {
-        'km': round(distance, 2) if len(valid) >= 2 else None,
+        'km': distance,
         'complete': False,  # Polling cannot establish exact boundary mileage.
-        'note': ('Som van positieve odometerverschillen tussen meetpunten binnen de selectie; '
-                 'ritten over de periodegrenzen en tussen ontbrekende updates kunnen afwijken. '
+        'note': ('Som van positieve odometerverschillen tussen geldige meetpunten '
+                 'binnen de selectie, ook bij ontbrekende tussenliggende standen; '
+                 'ritten over periodegrenzen blijven onbekend. '
                  'Dit is geen bevestigd aantal afzonderlijke ritten.'),
     }
 
