@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.18
+
+- Fixes selected-period distance when intermediate vehicle snapshots omit the odometer: sums changes between successive valid readings within the date range.
+- Adds regression tests for missing readings and decreasing odometer values; addresses Codex P2 finding on PR #7.
+
 ## 0.1.17
 
 - Adds a selected-period measured odometer-distance KPI, distinguishing observed positive deltas from unobserved boundary mileage and the number of actual drives.
