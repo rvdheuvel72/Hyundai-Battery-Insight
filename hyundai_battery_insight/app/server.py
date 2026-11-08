@@ -2249,31 +2249,39 @@ def selected_distance(rows, intervals):
     }
 
 
-def selected_ev_battery_stats(rows):
-    """Observed EV/HV battery percentages in the selected window.
-
-    The arithmetic mean is per available measurement, not time-weighted.
-    """
-    values = []
+def selected_ev_battery_stats(rows, start, end):
+    """Distinct EV observations in [start, end), never carried-forward rows."""
+    start, end = _validated_range(start, end)
+    observations = {}
     for row in rows:
-        value = row.get('ev_soc')
-        if value is None:
+        source_ts = iso_to_dt(row.get('ev_source_ts'))
+        if source_ts is None or not start <= source_ts < end:
             continue
+        value = row.get('ev_soc')
         try:
-            value = float(value)
+            value = float(value) if value is not None else None
         except (TypeError, ValueError):
             continue
-        if math.isfinite(value) and 0 <= value <= 100:
-            values.append(value)
+        if value is None or not math.isfinite(value) or not 0 <= value <= 100:
+            continue
+        # Same source timestamp represents one observation, even when carried
+        # into multiple HA correlation points or duplicated by raw snapshots.
+        # Prefer raw readings if conflicting sources share the same timestamp.
+        key = source_ts.isoformat()
+        if key not in observations or (row.get('source_kind') == 'raw'
+                                       and observations[key][1] != 'raw'):
+            observations[key] = (value, row.get('source_kind'))
+    values = [item[0] for item in observations.values()]
     return {
         'low': round(min(values), 1) if values else None,
         'average': round(sum(values) / len(values), 1) if values else None,
         'high': round(max(values), 1) if values else None,
         'measurements': len(values),
-        'note': ('Minimum, rekenkundig gemiddelde en maximum van beschikbare '
-                 'EV/HV-batterijmetingen binnen het gekozen venster; '
+        'note': ('Minimum, rekenkundig gemiddelde en maximum van unieke '
+                 'EV/HV-bronmetingen binnen het gekozen venster; '
                  'geen tijdgewogen gemiddelde.'),
     }
+
 
 
 def gouda_daily_weather(start, end):
@@ -2390,7 +2398,7 @@ class Handler(BaseHTTPRequestHandler):
                 'current': current_context(raw_rows),
                 'since_last_trip': since_last_trip_context(rows, intervals),
                 'period_distance': selected_distance(rows, intervals),
-                'ev_battery_stats': selected_ev_battery_stats(rows),
+                'ev_battery_stats': selected_ev_battery_stats(rows, range_start, range_end),
                 'weather': gouda_daily_weather(range_start, range_end),
                 'snapshots': [public_snapshot(r) for r in rows],
                 'intervals': intervals,
