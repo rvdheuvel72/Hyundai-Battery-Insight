@@ -164,6 +164,10 @@ jobs:
           assert 'touch-action:none' in html
           assert "addEventListener('wheel'" in html
           assert "addEventListener('pointermove'" in html
+          assert 'Math.hypot(xs[0].x-xs[1].x,xs[0].y-xs[1].y)' in html
+          assert "zoomPointers.clear();zoomDrag=null;zoomPinch=null" in html
+          assert "hbi-zoom-plot-clip" in html
+          assert 'let addPlot=node=>' in html
           scripts = re.findall(r'<script[^>]*>(.*?)</script>', html, re.S)
           assert len(scripts) == 1
           Path('/tmp/hbi-dashboard.js').write_text(scripts[0])
