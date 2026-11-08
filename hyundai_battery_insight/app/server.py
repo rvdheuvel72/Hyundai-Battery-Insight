@@ -2218,6 +2218,70 @@ def current_context(raw_rows):
     }
 
 
+
+# Gouda city-centre reference point; weather is contextual model data, not vehicle data.
+WEATHER_COORDS = (52.0167, 4.7083)
+WEATHER_CACHE = {}
+WEATHER_LOCK = threading.Lock()
+
+
+def selected_distance(rows, intervals):
+    """Sum observed positive odometer deltas, never infer unobserved boundary trips."""
+    distance = sum(max(0.0, float(i['odo_delta'])) for i in intervals
+                   if i.get('odo_delta') is not None)
+    valid = [r for r in rows if r.get('odometer') is not None]
+    return {
+        'km': round(distance, 2) if len(valid) >= 2 else None,
+        'complete': False,  # Polling cannot establish exact boundary mileage.
+        'note': ('Som van positieve odometerverschillen tussen meetpunten binnen de selectie; '
+                 'ritten over de periodegrenzen en tussen ontbrekende updates kunnen afwijken. '
+                 'Dit is geen bevestigd aantal afzonderlijke ritten.'),
+    }
+
+
+def gouda_daily_weather(start, end):
+    """Best-effort Open-Meteo daily 2m temperature, local calendar dates, no HA wake."""
+    today = dt.datetime.now(dt.timezone.utc).date()
+    first, last = start.date(), min(end.date(), today)
+    if first > last:
+        return {'days': [], 'status': 'unavailable'}
+    key = (first.isoformat(), last.isoformat())
+    with WEATHER_LOCK:
+        cached = WEATHER_CACHE.get(key)
+        if cached and time.monotonic() - cached[0] < 21600:
+            return cached[1]
+    params = {
+        'latitude': WEATHER_COORDS[0], 'longitude': WEATHER_COORDS[1],
+        'start_date': key[0], 'end_date': key[1],
+        'daily': 'temperature_2m_min,temperature_2m_max',
+        'timezone': 'Europe/Amsterdam', 'temperature_unit': 'celsius',
+        'models': 'ecmwf_ifs',
+    }
+    url = 'https://archive-api.open-meteo.com/v1/archive?' + urllib.parse.urlencode(params)
+    result = {'days': [], 'status': 'unavailable',
+              'source': 'Open-Meteo ECMWF IFS (model/reanalysis)',
+              'location': 'Gouda, Nederland', 'timezone': 'Europe/Amsterdam'}
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Hyundai-Battery-Insight/0.1.17'})
+        with urllib.request.urlopen(req, timeout=6) as response:
+            payload = json.load(response)
+        daily = payload.get('daily') or {}
+        dates = daily.get('time') or []
+        lows = daily.get('temperature_2m_min') or []
+        highs = daily.get('temperature_2m_max') or []
+        for day, low, high in zip(dates, lows, highs):
+            if low is None or high is None:
+                continue
+            result['days'].append({'date': day, 'min_c': float(low),
+                                   'max_c': float(high), 'partial': day == today.isoformat()})
+        result['status'] = 'ok' if result['days'] else 'unavailable'
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        print(f'[weather] Open-Meteo unavailable: {exc}', flush=True)
+    with WEATHER_LOCK:
+        WEATHER_CACHE[key] = (time.monotonic(), result)
+    return result
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print('[http] ' + (fmt % args), flush=True)
@@ -2272,6 +2336,8 @@ class Handler(BaseHTTPRequestHandler):
                 'resolved_entities': RESOLVED_ENTITIES,
                 'current': current_context(raw_rows),
                 'since_last_trip': since_last_trip_context(rows, intervals),
+                'period_distance': selected_distance(rows, intervals),
+                'weather': gouda_daily_weather(range_start, range_end),
                 'snapshots': [public_snapshot(r) for r in rows],
                 'intervals': intervals,
                 'journeys': journeys_from_intervals(intervals),
