@@ -168,11 +168,30 @@ jobs:
           assert "zoomPointers.clear();zoomDrag=null;zoomPinch=null" in html
           assert "hbi-zoom-plot-clip" in html
           assert 'let addPlot=node=>' in html
+          assert "drawWeather(DATA.weather||{},$('#zoomWeather'),$('#zoomWeatherNote'),zoomBounds)" in html
+          assert 'visibleDays.forEach((d,i)=>' in html
+          assert 'amsterdamMidday(d.date)' in html
           scripts = re.findall(r'<script[^>]*>(.*?)</script>', html, re.S)
           assert len(scripts) == 1
           Path('/tmp/hbi-dashboard.js').write_text(scripts[0])
           PY
           node --check /tmp/hbi-dashboard.js
+          node - <<'JS'
+          const fs=require('fs'),vm=require('vm'),assert=require('assert');
+          const source=fs.readFileSync('/tmp/hbi-dashboard.js','utf8');
+          const begin=source.indexOf('function amsterdamMidday(');
+          const end=source.indexOf('function drawWeather(',begin);
+          assert(begin>=0&&end>begin);
+          const sandbox={Intl,Date,Number};
+          vm.runInNewContext(source.slice(begin,end),sandbox);
+          assert.equal(sandbox.amsterdamMidday('2026-01-15'),Date.parse('2026-01-15T11:00:00Z'));
+          assert.equal(sandbox.amsterdamMidday('2026-07-15'),Date.parse('2026-07-15T10:00:00Z'));
+          assert(Number.isNaN(sandbox.amsterdamMidday('invalid')));
+          const center=sandbox.amsterdamMidday('2026-11-08');
+          const zoom=[center-3600000,center+3600000];
+          const fraction=(center-zoom[0])/(zoom[1]-zoom[0]);
+          assert.equal(fraction,0.5);
+          JS
 
       - name: Validate shell script
         run: bash -n hyundai_battery_insight/run.sh
