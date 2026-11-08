@@ -2240,7 +2240,7 @@ def selected_distance(rows, intervals):
 
 
 def gouda_daily_weather(start, end):
-    """Best-effort Open-Meteo daily 2m temperature, local calendar dates, no HA wake."""
+    """Open-Meteo historical IFS plus recent forecast/past-days; no vehicle calls."""
     today = dt.datetime.now(dt.timezone.utc).date()
     first, last = start.date(), min(end.date(), today)
     if first > last:
@@ -2250,33 +2250,47 @@ def gouda_daily_weather(start, end):
         cached = WEATHER_CACHE.get(key)
         if cached and time.monotonic() - cached[0] < 21600:
             return cached[1]
-    params = {
-        'latitude': WEATHER_COORDS[0], 'longitude': WEATHER_COORDS[1],
-        'start_date': key[0], 'end_date': key[1],
-        'daily': 'temperature_2m_min,temperature_2m_max',
-        'timezone': 'Europe/Amsterdam', 'temperature_unit': 'celsius',
-        'models': 'ecmwf_ifs',
-    }
-    url = 'https://archive-api.open-meteo.com/v1/archive?' + urllib.parse.urlencode(params)
-    result = {'days': [], 'status': 'unavailable',
-              'source': 'Open-Meteo ECMWF IFS (model/reanalysis)',
+    base = {'latitude': WEATHER_COORDS[0], 'longitude': WEATHER_COORDS[1],
+            'daily': 'temperature_2m_min,temperature_2m_max',
+            'timezone': 'Europe/Amsterdam', 'temperature_unit': 'celsius'}
+    by_date = {}
+    errors = []
+
+    def fetch_weather(host, params, source):
+        url = host + '?' + urllib.parse.urlencode(params)
+        try:
+            req = urllib.request.Request(
+                url, headers={'User-Agent': 'Hyundai-Battery-Insight/0.1.17'})
+            with urllib.request.urlopen(req, timeout=6) as response:
+                payload = json.load(response)
+            daily = payload.get('daily') or {}
+            for day, low, high in zip(daily.get('time') or [],
+                                      daily.get('temperature_2m_min') or [],
+                                      daily.get('temperature_2m_max') or []):
+                if low is not None and high is not None and key[0] <= day <= key[1]:
+                    by_date[day] = {'date': day, 'min_c': float(low),
+                                    'max_c': float(high),
+                                    'partial': day == today.isoformat(),
+                                    'source': source}
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            errors.append(str(exc))
+
+    # Archive covers the entire requested historical window when available.
+    fetch_weather('https://archive-api.open-meteo.com/v1/archive',
+                  {**base, 'start_date': key[0], 'end_date': key[1],
+                   'models': 'ecmwf_ifs'}, 'archive')
+    # Forecast past-days fills recent archive gaps and the current day.
+    if last >= today - dt.timedelta(days=7):
+        fetch_weather('https://api.open-meteo.com/v1/forecast',
+                      {**base, 'past_days': 7, 'forecast_days': 1},
+                      'recent_model')
+    result = {'days': [by_date[d] for d in sorted(by_date)],
+              'status': 'ok' if by_date else 'unavailable',
+              'source': 'Open-Meteo ECMWF IFS archive + recent forecast model',
               'location': 'Gouda, Nederland', 'timezone': 'Europe/Amsterdam'}
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Hyundai-Battery-Insight/0.1.17'})
-        with urllib.request.urlopen(req, timeout=6) as response:
-            payload = json.load(response)
-        daily = payload.get('daily') or {}
-        dates = daily.get('time') or []
-        lows = daily.get('temperature_2m_min') or []
-        highs = daily.get('temperature_2m_max') or []
-        for day, low, high in zip(dates, lows, highs):
-            if low is None or high is None:
-                continue
-            result['days'].append({'date': day, 'min_c': float(low),
-                                   'max_c': float(high), 'partial': day == today.isoformat()})
-        result['status'] = 'ok' if result['days'] else 'unavailable'
-    except (OSError, ValueError, TypeError, KeyError) as exc:
-        print(f'[weather] Open-Meteo unavailable: {exc}', flush=True)
+    if errors:
+        print('[weather] Partial/unavailable Open-Meteo: ' + '; '.join(errors),
+              flush=True)
     with WEATHER_LOCK:
         WEATHER_CACHE[key] = (time.monotonic(), result)
     return result
