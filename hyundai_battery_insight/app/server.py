@@ -2249,6 +2249,33 @@ def selected_distance(rows, intervals):
     }
 
 
+def selected_ev_battery_stats(rows):
+    """Observed EV/HV battery percentages in the selected window.
+
+    The arithmetic mean is per available measurement, not time-weighted.
+    """
+    values = []
+    for row in rows:
+        value = row.get('ev_soc')
+        if value is None:
+            continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and 0 <= value <= 100:
+            values.append(value)
+    return {
+        'low': round(min(values), 1) if values else None,
+        'average': round(sum(values) / len(values), 1) if values else None,
+        'high': round(max(values), 1) if values else None,
+        'measurements': len(values),
+        'note': ('Minimum, rekenkundig gemiddelde en maximum van beschikbare '
+                 'EV/HV-batterijmetingen binnen het gekozen venster; '
+                 'geen tijdgewogen gemiddelde.'),
+    }
+
+
 def gouda_daily_weather(start, end):
     """Open-Meteo historical IFS plus recent forecast/past-days; no vehicle calls."""
     today = dt.datetime.now(ZoneInfo('Europe/Amsterdam')).date()
@@ -2363,6 +2390,7 @@ class Handler(BaseHTTPRequestHandler):
                 'current': current_context(raw_rows),
                 'since_last_trip': since_last_trip_context(rows, intervals),
                 'period_distance': selected_distance(rows, intervals),
+                'ev_battery_stats': selected_ev_battery_stats(rows),
                 'weather': gouda_daily_weather(range_start, range_end),
                 'snapshots': [public_snapshot(r) for r in rows],
                 'intervals': intervals,
