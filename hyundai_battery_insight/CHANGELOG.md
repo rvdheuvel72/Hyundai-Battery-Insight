@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.17
+
+- Adds a selected-period measured odometer-distance KPI, distinguishing observed positive deltas from unobserved boundary mileage and the number of actual drives.
+- Adds daily minimum/maximum outside-air temperature for Gouda, Netherlands to the timeline via public Open-Meteo ECMWF IFS historical weather API, without querying or waking the car.
+- Displays external-weather provenance, incomplete current-day caveat and an explicit unavailable state when weather retrieval fails.
+
 ## 0.1.16
 
 - Treats odometer increases as **movement measurement windows**, not proof of one individual drive. Multiple real drives may occur between Hyundai cloud and Home Assistant polls.

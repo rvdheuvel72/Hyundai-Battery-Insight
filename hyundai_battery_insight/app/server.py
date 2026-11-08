@@ -17,6 +17,7 @@ import urllib.request
 from cryptography.fernet import Fernet, InvalidToken
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 PORT = 8099
 DATA_DIR = Path('/data')
@@ -2218,6 +2219,86 @@ def current_context(raw_rows):
     }
 
 
+
+# Gouda city-centre reference point; weather is contextual model data, not vehicle data.
+WEATHER_COORDS = (52.0167, 4.7083)
+WEATHER_CACHE = {}
+WEATHER_LOCK = threading.Lock()
+
+
+def selected_distance(rows, intervals):
+    """Sum observed positive odometer deltas, never infer unobserved boundary trips."""
+    distance = sum(max(0.0, float(i['odo_delta'])) for i in intervals
+                   if i.get('odo_delta') is not None)
+    valid = [r for r in rows if r.get('odometer') is not None]
+    return {
+        'km': round(distance, 2) if len(valid) >= 2 else None,
+        'complete': False,  # Polling cannot establish exact boundary mileage.
+        'note': ('Som van positieve odometerverschillen tussen meetpunten binnen de selectie; '
+                 'ritten over de periodegrenzen en tussen ontbrekende updates kunnen afwijken. '
+                 'Dit is geen bevestigd aantal afzonderlijke ritten.'),
+    }
+
+
+def gouda_daily_weather(start, end):
+    """Open-Meteo historical IFS plus recent forecast/past-days; no vehicle calls."""
+    today = dt.datetime.now(ZoneInfo('Europe/Amsterdam')).date()
+    first = start.astimezone(ZoneInfo('Europe/Amsterdam')).date()
+    last = min((end - dt.timedelta(microseconds=1)).astimezone(
+        ZoneInfo('Europe/Amsterdam')).date(), today)
+    if first > last:
+        return {'days': [], 'status': 'unavailable'}
+    key = (first.isoformat(), last.isoformat())
+    with WEATHER_LOCK:
+        cached = WEATHER_CACHE.get(key)
+        if cached and time.monotonic() - cached[0] < 21600:
+            return cached[1]
+    base = {'latitude': WEATHER_COORDS[0], 'longitude': WEATHER_COORDS[1],
+            'daily': 'temperature_2m_min,temperature_2m_max',
+            'timezone': 'Europe/Amsterdam', 'temperature_unit': 'celsius'}
+    by_date = {}
+    errors = []
+
+    def fetch_weather(host, params, source):
+        url = host + '?' + urllib.parse.urlencode(params)
+        try:
+            req = urllib.request.Request(
+                url, headers={'User-Agent': 'Hyundai-Battery-Insight/0.1.17'})
+            with urllib.request.urlopen(req, timeout=6) as response:
+                payload = json.load(response)
+            daily = payload.get('daily') or {}
+            for day, low, high in zip(daily.get('time') or [],
+                                      daily.get('temperature_2m_min') or [],
+                                      daily.get('temperature_2m_max') or []):
+                if low is not None and high is not None and key[0] <= day <= key[1]:
+                    by_date[day] = {'date': day, 'min_c': float(low),
+                                    'max_c': float(high),
+                                    'partial': day == today.isoformat(),
+                                    'source': source}
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            errors.append(str(exc))
+
+    # Archive covers the entire requested historical window when available.
+    fetch_weather('https://archive-api.open-meteo.com/v1/archive',
+                  {**base, 'start_date': key[0], 'end_date': key[1],
+                   'models': 'ecmwf_ifs'}, 'archive')
+    # Forecast past-days fills recent archive gaps and the current day.
+    if last >= today - dt.timedelta(days=7):
+        fetch_weather('https://api.open-meteo.com/v1/forecast',
+                      {**base, 'past_days': 7, 'forecast_days': 1},
+                      'recent_model')
+    result = {'days': [by_date[d] for d in sorted(by_date)],
+              'status': 'ok' if by_date else 'unavailable',
+              'source': 'Open-Meteo ECMWF IFS archive + recent forecast model',
+              'location': 'Gouda, Nederland', 'timezone': 'Europe/Amsterdam'}
+    if errors:
+        print('[weather] Partial/unavailable Open-Meteo: ' + '; '.join(errors),
+              flush=True)
+    with WEATHER_LOCK:
+        WEATHER_CACHE[key] = (time.monotonic(), result)
+    return result
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print('[http] ' + (fmt % args), flush=True)
@@ -2272,6 +2353,8 @@ class Handler(BaseHTTPRequestHandler):
                 'resolved_entities': RESOLVED_ENTITIES,
                 'current': current_context(raw_rows),
                 'since_last_trip': since_last_trip_context(rows, intervals),
+                'period_distance': selected_distance(rows, intervals),
+                'weather': gouda_daily_weather(range_start, range_end),
                 'snapshots': [public_snapshot(r) for r in rows],
                 'intervals': intervals,
                 'journeys': journeys_from_intervals(intervals),

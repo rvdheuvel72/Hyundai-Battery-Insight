@@ -87,6 +87,40 @@ jobs:
       - name: Compile Python
         run: python -m py_compile hyundai_battery_insight/app/server.py
 
+      - name: Test selected-period distance and weather fallback
+        run: |
+          python - <<'PY'
+          import importlib.util
+          import datetime as dt
+          import io
+          import json
+          from unittest.mock import patch
+          spec = importlib.util.spec_from_file_location('hbi', 'hyundai_battery_insight/app/server.py')
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          rows = [{'odometer': 100}, {'odometer': 104.5}, {'odometer': 104.5}]
+          intervals = [{'odo_delta': 4.5}, {'odo_delta': 0}]
+          result = mod.selected_distance(rows, intervals)
+          assert result['km'] == 4.5 and result['complete'] is False
+          assert mod.selected_distance([rows[0]], [])['km'] is None
+          today = dt.datetime.now(dt.timezone.utc)
+          fake = {'daily': {'time': [today.date().isoformat()],
+                            'temperature_2m_min': [3.1],
+                            'temperature_2m_max': [9.2]}}
+          class Response(io.BytesIO):
+              def __enter__(self): return self
+              def __exit__(self, *args): self.close()
+          def urlopen(req, timeout):
+              if 'archive-api' in req.full_url:
+                  raise OSError('archive unavailable')
+              return Response(json.dumps(fake).encode())
+          with patch.object(mod.urllib.request, 'urlopen', side_effect=urlopen):
+              weather = mod.gouda_daily_weather(today-dt.timedelta(days=1), today)
+          assert weather['status'] == 'ok' and weather['days'][0]['min_c'] == 3.1
+          assert weather['days'][0]['max_c'] == 9.2
+          print('Distance and weather fallback OK')
+          PY
+
       - name: Validate shell script
         run: bash -n hyundai_battery_insight/run.sh
 
