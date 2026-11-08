@@ -17,6 +17,7 @@ import urllib.request
 from cryptography.fernet import Fernet, InvalidToken
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 PORT = 8099
 DATA_DIR = Path('/data')
@@ -2241,8 +2242,9 @@ def selected_distance(rows, intervals):
 
 def gouda_daily_weather(start, end):
     """Open-Meteo historical IFS plus recent forecast/past-days; no vehicle calls."""
-    today = dt.datetime.now(dt.timezone.utc).date()
-    first, last = start.date(), min(end.date(), today)
+    today = dt.datetime.now(ZoneInfo('Europe/Amsterdam')).date()
+    first = start.astimezone(ZoneInfo('Europe/Amsterdam')).date()
+    last = min(end.astimezone(ZoneInfo('Europe/Amsterdam')).date(), today)
     if first > last:
         return {'days': [], 'status': 'unavailable'}
     key = (first.isoformat(), last.isoformat())
