@@ -148,18 +148,26 @@ jobs:
           print('Distance and weather fallback OK')
           PY
 
-      - name: Validate comparison tab JavaScript and markup
+      - name: Validate zoom tab JavaScript and markup
         run: |
           python - <<'PY'
           from pathlib import Path
           import re
           html = Path('hyundai_battery_insight/app/index.html').read_text()
           assert html.count('id="paneClassic"') == 1
-          assert html.count('id="paneAnalysis"') == 1
-          assert 'aria-selected="true">Huidige grafiek' in html
-          assert 'function drawAnalysis(rows,intervals)' in html
-          assert 'draw(DATA.snapshots||[],DATA.intervals||[])' in html
-          assert 'drawAnalysis(DATA.snapshots||[],DATA.intervals||[])' in html
+          assert html.count('id="paneZoom"') == 1
+          assert 'id="paneAnalysis"' not in html
+          assert 'aria-selected="true" aria-controls="paneClassic">Origineel' in html
+          assert 'function draw(rows,intervals,options={})' in html
+          assert 'function drawZoom()' in html
+          assert "draw(DATA.snapshots||[],DATA.intervals||[])" in html
+          assert 'touch-action:none' in html
+          assert "addEventListener('wheel'" in html
+          assert "addEventListener('pointermove'" in html
+          assert 'Math.hypot(xs[0].x-xs[1].x,xs[0].y-xs[1].y)' in html
+          assert "zoomPointers.clear();zoomDrag=null;zoomPinch=null" in html
+          assert "hbi-zoom-plot-clip" in html
+          assert 'let addPlot=node=>' in html
           scripts = re.findall(r'<script[^>]*>(.*?)</script>', html, re.S)
           assert len(scripts) == 1
           Path('/tmp/hbi-dashboard.js').write_text(scripts[0])
