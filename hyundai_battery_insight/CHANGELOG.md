@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.21
+
+- Replaces the previous alternative analysis chart with a second tab showing the original chart with interactive mouse-wheel zoom, pointer dragging and mobile pinch-to-zoom/pan.
+- Keeps the original chart as the default, unchanged in its original tab. Zoom is display-only and does not change stored data or selected date range.
+- Includes zoom reset and +/- controls; temperature remains visible beneath the zoomable graph.
+
 ## 0.1.20
 
 - Adds a second 'Analyseweergave (nieuw)' tab to compare against the unchanged original chart.
