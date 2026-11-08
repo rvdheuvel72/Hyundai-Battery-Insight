@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.22
+
+- Synchronizes the Gouda daily minimum/maximum temperature chart with the zoom/pan tab's visible time window.
+- Aligns daily temperatures to Europe/Amsterdam local dates, including daylight saving time; keeps the original graph tab unchanged.
+- Adds CI regression checks for zoom linkage and seasonal time offsets.
+
 ## 0.1.21
 
 - Replaces the previous alternative analysis chart with a second tab showing the original chart with interactive mouse-wheel zoom, pointer dragging and mobile pinch-to-zoom/pan.
