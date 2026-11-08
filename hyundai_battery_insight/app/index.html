@@ -65,11 +65,11 @@ function initZoomEvents(){
 function amsterdamMidday(dateString){
   // Daily Open-Meteo dates are Gouda local calendar days, not browser-local days.
   // Compute the UTC instant of 12:00 Europe/Amsterdam, respecting DST.
-  if(!/^\\d{4}-\\d{2}-\\d{2}$/.test(dateString))return NaN;
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(dateString))return NaN;
   let noon=Date.parse(dateString+'T12:00:00Z');
   if(!Number.isFinite(noon))return NaN;
   let tz=new Intl.DateTimeFormat('en-US',{timeZone:'Europe/Amsterdam',timeZoneName:'shortOffset'}).formatToParts(new Date(noon)).find(p=>p.type==='timeZoneName')?.value||'GMT+1';
-  let match=tz.match(/^GMT([+-])(\\d{1,2})(?::(\\d{2}))?$/);
+  let match=tz.match(/^GMT([+-])(\d{1,2})(?::(\d{2}))?$/);
   let offset=match?(match[1]==='-'?-1:1)*(Number(match[2])*60+Number(match[3]||0)):60;
   return noon-offset*60000;
 }
