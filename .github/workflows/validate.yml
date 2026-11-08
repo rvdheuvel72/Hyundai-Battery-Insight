@@ -122,6 +122,12 @@ jobs:
               weather = mod.gouda_daily_weather(today-dt.timedelta(days=1), today)
           assert weather['status'] == 'ok' and weather['days'][0]['min_c'] == 3.1
           assert weather['days'][0]['max_c'] == 9.2
+          stats = mod.selected_ev_battery_stats([
+              {'ev_soc': 30}, {'ev_soc': None}, {'ev_soc': 60},
+              {'ev_soc': 90}, {'ev_soc': 120}])
+          assert stats['low'] == 30 and stats['average'] == 60
+          assert stats['high'] == 90 and stats['measurements'] == 3
+          assert mod.selected_ev_battery_stats([{'ev_soc': None}])['average'] is None
           print('Distance and weather fallback OK')
           PY
 
