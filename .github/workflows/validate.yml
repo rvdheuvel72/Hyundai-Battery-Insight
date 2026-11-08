@@ -157,7 +157,7 @@ jobs:
           assert html.count('id="paneClassic"') == 1
           assert html.count('id="paneZoom"') == 1
           assert 'id="paneAnalysis"' not in html
-          assert 'aria-selected="true">Origineel' in html
+          assert 'aria-selected="true" aria-controls="paneClassic">Origineel' in html
           assert 'function draw(rows,intervals,options={})' in html
           assert 'function drawZoom()' in html
           assert "draw(DATA.snapshots||[],DATA.intervals||[])" in html
