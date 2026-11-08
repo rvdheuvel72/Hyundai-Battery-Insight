@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.20
+
+- Adds a second 'Analyseweergave (nieuw)' tab to compare against the unchanged original chart.
+- Shows 12V and HV time series, filterable event markers, shared measurement hover and Gouda temperature overview from the same selected range.
+- Keeps the original chart as the default; no changes to data collection or inference logic.
+
 ## 0.1.19
 
 - Adds selected-window EV/HV battery low, arithmetic average, and high, based only on available valid observations; missing samples are excluded and the average is not time-weighted.
