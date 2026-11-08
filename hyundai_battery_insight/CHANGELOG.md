@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.19
+
+- Adds selected-window EV/HV battery low, arithmetic average, and high, based only on available valid observations; missing samples are excluded and the average is not time-weighted.
+- Keeps all seven top-level dashboard KPI cards on one row on desktop with responsive text sizing; mobile retains compact columns.
+- Adds regression coverage for EV battery statistics.
+
 ## 0.1.18
 
 - Fixes selected-period distance when intermediate vehicle snapshots omit the odometer: sums changes between successive valid readings within the date range.
