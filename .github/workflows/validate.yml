@@ -102,6 +102,10 @@ jobs:
           intervals = [{'odo_delta': 4.5}, {'odo_delta': 0}]
           result = mod.selected_distance(rows, intervals)
           assert result['km'] == 4.5 and result['complete'] is False
+          assert mod.selected_distance([{'odometer': 100}, {'odometer': None},
+                                        {'odometer': 110}], [])['km'] == 10.0
+          assert mod.selected_distance([{'odometer': 110}, {'odometer': None},
+                                        {'odometer': 100}], [])['km'] == 0.0
           assert mod.selected_distance([rows[0]], [])['km'] is None
           today = dt.datetime.now(dt.timezone.utc)
           fake = {'daily': {'time': [today.date().isoformat()],
