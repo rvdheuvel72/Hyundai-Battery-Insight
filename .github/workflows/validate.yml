@@ -122,12 +122,29 @@ jobs:
               weather = mod.gouda_daily_weather(today-dt.timedelta(days=1), today)
           assert weather['status'] == 'ok' and weather['days'][0]['min_c'] == 3.1
           assert weather['days'][0]['max_c'] == 9.2
-          stats = mod.selected_ev_battery_stats([
-              {'ev_soc': 30}, {'ev_soc': None}, {'ev_soc': 60},
-              {'ev_soc': 90}, {'ev_soc': 120}])
-          assert stats['low'] == 30 and stats['average'] == 60
-          assert stats['high'] == 90 and stats['measurements'] == 3
-          assert mod.selected_ev_battery_stats([{'ev_soc': None}])['average'] is None
+          begin = dt.datetime(2026, 11, 8, 0, tzinfo=dt.timezone.utc)
+          finish = begin + dt.timedelta(hours=5)
+          def ev(value, observation_hour, row_hour, kind='ha_history'):
+              return {'source_ts': (begin + dt.timedelta(hours=row_hour)).isoformat(),
+                      'ev_source_ts': (begin + dt.timedelta(hours=observation_hour)).isoformat(),
+                      'ev_soc': value, 'source_kind': kind}
+          # Correlated hourly 12V rows carry the first HV reading forward.
+          correlated = [ev(30, 0, 0), ev(30, 0, 1), ev(30, 0, 2),
+                        ev(30, 0, 3), ev(90, 4, 4)]
+          stats = mod.selected_ev_battery_stats(correlated, begin, finish)
+          assert stats == {**stats, 'low': 30, 'average': 60, 'high': 90,
+                           'measurements': 2}, stats
+          # A carried-forward value originating before the selection is excluded.
+          inside = mod.selected_ev_battery_stats(correlated[1:],
+                                                  begin + dt.timedelta(hours=1),
+                                                  finish)
+          assert inside['measurements'] == 1 and inside['average'] == 90, inside
+          # Duplicate raw/history timestamps are a single observation.
+          duplicate = mod.selected_ev_battery_stats(
+              correlated + [ev(90, 4, 4, 'raw')], begin, finish)
+          assert duplicate['measurements'] == 2 and duplicate['average'] == 60
+          assert mod.selected_ev_battery_stats(
+              [ev(None, 1, 1), ev(120, 2, 2)], begin, finish)['average'] is None
           print('Distance and weather fallback OK')
           PY
 
